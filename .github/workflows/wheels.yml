@@ -1,0 +1,119 @@
+# Python wheels and sdist: matfun (Linux x86-64 / aarch64, macOS, Windows), matfun-cuda13 and -cuda12 (Linux).
+# Runs on tags v* (then it also creates a draft GitHub release) and by hand.  Uploading to PyPI only happens when started by hand with "publish" checked, and needs a
+# trusted publisher on pypi.org for this repository and the environment "pypi".
+name: wheels
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "upload to PyPI"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  base:
+    name: matfun (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pypa/cibuildwheel@v4.3
+        env:
+          # one wheel per platform (py3-none-<platform>, no CPython extension): build with one interpreter only
+          CIBW_BUILD: cp313-*
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: python -m pytest {project}/python/tests -v
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-base-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build && python -m build --sdist -o dist .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  cuda:
+    name: matfun-cuda${{ matrix.cuda }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: ["13", "12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pypa/cibuildwheel@v4.3
+        with:
+          package-dir: python/cuda${{ matrix.cuda }}
+        env:
+          CIBW_BUILD: cp313-manylinux_x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # nvcc: CUDA 13 from the nvidia-cuda-nvcc wheel, CUDA 12.9 from NVIDIA's RHEL 8 repository
+          CIBW_BEFORE_ALL_LINUX: >
+            if [ "${{ matrix.cuda }}" = "12" ]; then
+              dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
+              dnf install -y cuda-nvcc-12-9 cuda-cudart-devel-12-9;
+            else
+              python3.13 -m pip install "nvidia-cuda-nvcc>=13,<14" "nvidia-cuda-runtime>=13,<14";
+            fi
+          CIBW_ENVIRONMENT_LINUX: >
+            CUDACXX=${{ matrix.cuda == '12' && '/usr/local/cuda-12.9/bin/nvcc' || '$(python3.13 -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13/bin/nvcc' }}
+          # libcudart comes from the nvidia runtime wheel at run time; do not copy it into the wheel
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            auditwheel repair --exclude libcudart.so.${{ matrix.cuda }} -w {dest_dir} {wheel}
+          CIBW_TEST_SKIP: "*"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-cuda${{ matrix.cuda }}
+          path: wheelhouse/*.whl
+
+  # draft GitHub release with all wheels and the sdist; publishing it on GitHub (by hand) makes Zenodo mint the DOI
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [base, sdist, cuda]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "matfun $GITHUB_REF_NAME"
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [base, sdist, cuda]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

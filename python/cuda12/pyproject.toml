@@ -1,0 +1,51 @@
+# Plugin package "matfun-cuda12": the CUDA kernel (libmatfun_cuda, CUDA 12) for matfun.jax.
+# Normally installed as an extra:  pip install "matfun[cuda12]"
+# Local build (needs nvcc 12, e.g. conda-forge cuda-nvcc=12.9: CUDACXX=.../bin/nvcc):
+#                                  pip install ./python/cuda12
+#                                  pip install ./python/cuda12 -C cmake.define.CMAKE_CUDA_ARCHITECTURES=native  (faster)
+# GPU architectures: Volta (sm_70) to Blackwell (sm_120) as machine code, plus PTX of sm_120 (needs nvcc >= 12.8).
+# Builds from the repository root (cmake.source-dir), so it must stay inside the repository.
+[build-system]
+requires = ["scikit-build-core>=0.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "matfun-cuda12"
+version = "0.1.0"
+description = "CUDA 12 kernels for matfun (matrix functions of symmetric and general 3x3 matrices with derivatives)"
+requires-python = ">=3.10"
+dependencies = ["matfun==0.1.0", "nvidia-cuda-runtime-cu12>=12,<13"]
+license = "MIT AND Apache-2.0"                   # Apache-2.0: the XLA FFI headers compiled into libmatfun_cuda
+license-files = ["LICENSE", "LICENSE-xla_ffi"]
+authors = [{ name = "Tobias Bode" }]
+keywords = ["matrix functions", "matrix logarithm", "matrix exponential", "jax", "cuda", "finite elements"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+]
+
+[project.urls]
+Homepage = "https://github.com/BodeTobias/matfun"
+Repository = "https://github.com/BodeTobias/matfun"
+Issues = "https://github.com/BodeTobias/matfun/issues"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.24"
+cmake.source-dir = "../.."
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/matfun_cuda12"]
+wheel.py-api = "py3"
+
+[tool.scikit-build.cmake.define]
+MATFUN_BUILD_C = "OFF"
+MATFUN_BUILD_CUDA = "ON"
+MATFUN_WITH_XLA_FFI = "ON"
+MATFUN_PY_INSTALL_DIR = "matfun_cuda12"
+MATFUN_CUDART_RPATH = "$ORIGIN/../nvidia/cuda_runtime/lib"
+CMAKE_CUDA_ARCHITECTURES = "70-real;75-real;80-real;86-real;89-real;90-real;100-real;120"

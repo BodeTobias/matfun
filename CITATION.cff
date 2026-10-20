@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "matfun: matrix functions of symmetric and general 3x3 matrices with first and second derivatives"
+type: software
+authors:
+  - family-names: Bode
+    given-names: Tobias
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/BodeTobias/matfun"
+keywords:
+  - matrix functions
+  - matrix logarithm
+  - matrix exponential
+  - Daleckii-Krein
+  - finite elements
+  - JAX
+  - CUDA

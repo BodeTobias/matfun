@@ -1,0 +1,7 @@
+name = "MatFun"
+uuid = "473decf3-e9c7-4f22-9ee0-c022ec7ae7ef"
+authors = ["Tobias Bode"]
+version = "0.1.0"
+
+[compat]
+julia = "1.9"

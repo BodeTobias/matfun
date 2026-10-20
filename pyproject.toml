@@ -1,0 +1,55 @@
+# Python package "matfun": C library + NumPy API (capi), JAX with XLA FFI kernels (jax), pure JAX (jaxpure).
+#   pip install .                    C library (Linux x86-64: AVX-512 / AVX2 / scalar chosen at run time; OpenMP)
+#   pip install ".[jax]"             + JAX (CPU)
+#   pip install "matfun[cuda13]"  + jax[cuda13] + the CUDA plugin matfun-cuda13 (python/cuda13/)
+# The wheel is portable as built (MATFUN_SIMD=dispatch); -C cmake.define.MATFUN_SIMD=native builds for this CPU only.
+[build-system]
+requires = ["scikit-build-core>=0.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "matfun"
+version = "0.1.0"
+description = "exp, log, sqrt, A^alpha of symmetric and general 3x3 matrices with first and second derivatives (C, CUDA, JAX)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+license = "MIT AND Apache-2.0"                   # Apache-2.0: the XLA FFI headers compiled into libmatfun
+license-files = ["LICENSE", "third_party/xla_ffi/LICENSE"]
+authors = [{ name = "Tobias Bode" }]
+keywords = ["matrix functions", "matrix logarithm", "matrix exponential", "jax", "cuda", "finite elements"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Homepage = "https://github.com/BodeTobias/matfun"
+Repository = "https://github.com/BodeTobias/matfun"
+Issues = "https://github.com/BodeTobias/matfun/issues"
+
+[project.optional-dependencies]
+jax = ["jax>=0.6"]
+cuda13 = ["jax[cuda13]>=0.6", "matfun-cuda13==0.1.0"]
+cuda12 = ["jax[cuda12]>=0.6", "matfun-cuda12==0.1.0"]
+test = ["pytest", "jax>=0.6", "mpmath"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.24"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["python/src/matfun"]
+wheel.py-api = "py3"              # no CPython extension: one wheel per platform for all Python versions
+sdist.exclude = ["build*", "dist", ".git*", "java", "julia", "python/cuda12", "python/cuda13"]
+
+[tool.scikit-build.cmake.define]
+MATFUN_BUILD_C = "ON"
+MATFUN_BUILD_CUDA = "OFF"
+MATFUN_WITH_XLA_FFI = "ON"
+MATFUN_PY_INSTALL_DIR = "matfun"
