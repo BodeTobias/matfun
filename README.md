@@ -107,6 +107,10 @@ cd java && mvn test
 julia --project=julia/MatFun -e 'using Pkg; Pkg.test()'
 ```
 
+## Development
+
+Parts of the code, tests and documentation were developed with AI assistance (Claude, Anthropic). All content was reviewed and tested by the author, who maintains the project.
+
 ## Citation and license
 
 See `CITATION.cff` (GitHub: "Cite this repository"). License: MIT (`LICENSE`); `third_party/xla_ffi` is Apache 2.0.
