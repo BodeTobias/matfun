@@ -1,6 +1,7 @@
 # Python wheels and sdist: matfun (Linux x86-64 / aarch64, macOS, Windows), matfun-cuda13 and -cuda12 (Linux).
 # Runs on tags v* (then it also creates a draft GitHub release) and by hand.  Uploading to PyPI only happens when started by hand with "publish" checked, and needs a
-# trusted publisher on pypi.org for this repository and the environment "pypi".
+# trusted publisher on pypi.org for each project: matfun with the environment "pypi", matfun-cuda13 with "pypi-cuda13",
+# matfun-cuda12 with "pypi-cuda12".
 name: wheels
 
 on:
@@ -104,9 +105,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "matfun $GITHUB_REF_NAME"
 
+  # one job (and GitHub environment) per PyPI project: a pending trusted publisher on PyPI is identified by owner,
+  # repository, workflow and environment, and that combination can be registered for one new project only
   publish:
     if: github.event_name == 'workflow_dispatch' && inputs.publish
-    needs: [base, sdist, cuda]
+    needs: [base, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -115,5 +118,27 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: wheels-base-*
           merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          name: sdist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-cuda:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [cuda, publish]                       # the plugins require matfun==<version> on PyPI
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cuda: ["13", "12"]
+    environment: pypi-cuda${{ matrix.cuda }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          name: wheels-cuda${{ matrix.cuda }}
       - uses: pypa/gh-action-pypi-publish@release/v1
