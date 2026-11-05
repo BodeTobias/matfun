@@ -1,5 +1,7 @@
 # matfun
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23981300.svg)](https://doi.org/10.5281/zenodo.23981300)
+
 Matrix functions **exp, log, sqrt and pow** of 3×3 matrices with **first and second derivatives**, for Newton solvers in finite element codes with many integration points:
 - `smf`: symmetric matrices, derivatives with respect to the matrix or its Voigt components;
 - `gmf`: general (non-symmetric) real matrices, the full derivatives ∂F<sub>ab</sub>/∂A<sub>cd</sub>, principal branch, including complex eigenvalues (rotations) and defective matrices (simple shear).
@@ -113,4 +115,4 @@ Parts of the code, tests and documentation were developed with AI assistance (Cl
 
 ## Citation and license
 
-See `CITATION.cff` (GitHub: "Cite this repository"). License: MIT (`LICENSE`); `third_party/xla_ffi` is Apache 2.0.
+Please cite matfun as `doi:10.5281/zenodo.23981300` (all versions); details in `CITATION.cff` (GitHub: "Cite this repository"). License: MIT (`LICENSE`); `third_party/xla_ffi` is Apache 2.0.
