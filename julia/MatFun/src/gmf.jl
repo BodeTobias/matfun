@@ -101,44 +101,75 @@ function _gdetlu(M, s)
     return sgn * P[1] * bb * (ee - dd / bb * cc)
 end
 
-# eigenvalues of S (flat, row-major): x[1] real, x[2], x[3] a real or a conjugate pair
-function _groots(S::Vector{W}) where {W}
-    tau = (S[1] + S[5] + S[9]) / 3
-    Sp = [k % 4 == 1 ? S[k] - tau : S[k] for k in 1:9]
-    s = maximum(abs, Sp)
-    t = _gpow2(s)
-    Sp = Sp ./ t
-    P = (Sp[1] * Sp[1] + Sp[5] * Sp[5] + Sp[9] * Sp[9]) / 2 + Sp[2] * Sp[4] + Sp[3] * Sp[7] + Sp[6] * Sp[8]
-    Q = _gdet3(Sp)
-    u = _gpow2(max(sqrt(abs(P)), cbrt(abs(Q))))
-    iu = 1 / u
-    P = P * iu * iu
-    Q = Q * iu * iu * iu
-    t = t * u
-    if P > 0 && 4 * P * P * P >= 27 * Q * Q
-        p3 = P / 3
-        r = Q / 2 / (p3 * sqrt(p3))
-        r = r > 1 ? one(r) : (r < -1 ? -one(r) : r)
-        ph = acos(r) / 3
-        s1 = 2 * sqrt(p3) * cos(r >= 0 ? ph : ph + TWO_PI_3)
-    else
-        D = Q * Q / 4 - P * P * P / 27
-        uc = cbrt(Q / 2 + _copysgn(sqrt(D > 0 ? D : zero(D)), Q))
-        s1 = uc + (uc != 0 ? P / (3 * uc) : zero(uc))
+# scratch arrays of one evaluation (allocated once per gmf! call and reused for all matrices of a chunk); flat,
+# 0-based layouts as in the C++ kernel: matrices row-major (k = 3 row + column), r[9 m + k], D2[3 j + k],
+# D3[9 j + 3 k + l], Z[9 (3 m + n) + k], Yh[81 m + 9 de + fb]
+struct _GWork{W}
+    a::Vector{W}; As::Vector{W}; S::Vector{W}; Sp::Vector{W}
+    xr::Vector{W}; xi::Vector{W}; mr::Vector{W}; mi::Vector{W}; ab::Vector{Bool}
+    offr::Vector{W}; offi::Vector{W}; ur::Vector{W}; ui::Vector{W}
+    Dr::Vector{W}; Di::Vector{W}; Epr::Vector{W}; Epi::Vector{W}; Ecr::Vector{W}; Eci::Vector{W}
+    accr::Vector{W}; acci::Vector{W}
+    B0::Vector{W}; B1::Vector{W}; r::Vector{W}
+    E2r::Vector{W}; E2i::Vector{W}; D2::Vector{W}; Y::Vector{W}
+    E3r::Vector{W}; E3i::Vector{W}; Z::Vector{W}; Yh::Vector{W}
+end
+function _GWork{W}() where {W}
+    z(n) = zeros(W, n)
+    return _GWork{W}(z(9), z(9), z(9), z(9), z(3), z(3), z(3), z(3), zeros(Bool, 3), z(3), z(3), z(3), z(3),
+                     z(19), z(19), z(19), z(19), z(19), z(19), z(19), z(19), z(9), z(9), z(27),
+                     z(9), z(9), z(9), z(27), z(27), z(27), z(81), z(243))
+end
+
+# eigenvalues of w.S (flat, row-major) into w.xr, w.xi: x[1] real, x[2], x[3] a real or a conjugate pair
+@inline function _groots!(w::_GWork{W}) where {W}
+    S, Sp = w.S, w.Sp
+    @inbounds begin
+        tau = (S[1] + S[5] + S[9]) / 3
+        s = zero(W)
+        for k in 1:9
+            Sp[k] = k % 4 == 1 ? S[k] - tau : S[k]
+            s = max(s, abs(Sp[k]))
+        end
+        t = _gpow2(s)
+        it = 1 / t
+        for k in 1:9
+            Sp[k] *= it
+        end
+        P = (Sp[1] * Sp[1] + Sp[5] * Sp[5] + Sp[9] * Sp[9]) / 2 + Sp[2] * Sp[4] + Sp[3] * Sp[7] + Sp[6] * Sp[8]
+        Q = _gdet3(Sp)
+        u = _gpow2(max(sqrt(abs(P)), cbrt(abs(Q))))
+        iu = 1 / u
+        P = P * iu * iu
+        Q = Q * iu * iu * iu
+        t = t * u
+        if P > 0 && 4 * P * P * P >= 27 * Q * Q
+            p3 = P / 3
+            r = Q / 2 / (p3 * sqrt(p3))
+            r = r > 1 ? one(r) : (r < -1 ? -one(r) : r)
+            ph = acos(r) / 3
+            s1 = 2 * sqrt(p3) * cos(r >= 0 ? ph : ph + TWO_PI_3)
+        else
+            D = Q * Q / 4 - P * P * P / 27
+            uc = cbrt(Q / 2 + _copysgn(sqrt(D > 0 ? D : zero(D)), Q))
+            s1 = uc + (uc != 0 ? P / (3 * uc) : zero(uc))
+        end
+        d = P - 0.75 * s1 * s1
+        real = d >= 0
+        sq = sqrt(abs(d))
+        sa = -s1 / 2 - _copysgn(sq, s1)
+        prod = s1 != 0 ? Q / s1 : -P
+        sb = sa != 0 ? prod / sa : zero(sa)
+        im = real ? zero(sq) : sq * t
+        w.xr[1], w.xr[2], w.xr[3] = s1 * t + tau, (real ? sa : -s1 / 2) * t + tau, (real ? sb : -s1 / 2) * t + tau
+        w.xi[1], w.xi[2], w.xi[3] = zero(im), im, -im
     end
-    d = P - 0.75 * s1 * s1
-    real = d >= 0
-    sq = sqrt(abs(d))
-    sa = -s1 / 2 - _copysgn(sq, s1)
-    prod = s1 != 0 ? Q / s1 : -P
-    sb = sa != 0 ? prod / sa : zero(sa)
-    im = real ? zero(sq) : sq * t
-    return ([s1 * t + tau, (real ? sa : -s1 / 2) * t + tau, (real ? sb : -s1 / 2) * t + tau], [zero(im), im, -im])
+    return nothing
 end
 
 # real node j: 3 Newton steps on det(A - mu I), derivative from the other nodes
-function _gnewton!(As, mr, mi, j)
-    for _ in 1:3
+@inline function _gnewton!(As, mr, mi, j)
+    @inbounds for _ in 1:3
         dr, di = one(mr[1]), zero(mr[1])
         for k in 1:3
             k == j && continue
@@ -147,6 +178,18 @@ function _gnewton!(As, mr, mi, j)
         (dr == 0 && di == 0) && continue
         ir, _ = _cinv(dr, di)
         mr[j] = mr[j] + _gdetlu(As, mr[j]) * ir
+    end
+    return nothing
+end
+
+# T = I + i N (N strictly lower: N10, N20, N21) applied to the index of stride s of the 3-vectors in (Er, Ei)
+# starting at base (0-based)
+@inline function _gapplyT!(Er, Ei, base, s, N10, N20, N21)
+    @inbounds begin
+        i0, i1, i2 = base + 1, base + s + 1, base + 2s + 1
+        vr0, vr1, vr2, vi0, vi1, vi2 = Er[i0], Er[i1], Er[i2], Ei[i0], Ei[i1], Ei[i2]
+        Er[i0] = vr0 - (N10 * vi1 + N20 * vi2); Er[i1] = vr1 - N21 * vi2
+        Ei[i0] = vi0 + (N10 * vr1 + N20 * vr2); Ei[i1] = vi1 + N21 * vr2
     end
     return nothing
 end
@@ -182,19 +225,28 @@ _gpos1(j) = _gtpos(1, Int(j >= 1), Int(j >= 2)) + 1                       # 1-ba
 _gpos2(j, k) = _gtpos(2, Int(j >= 1) + Int(k >= 1), Int(j >= 2) + Int(k >= 2)) + 1
 _gpos3(j, k, l) = _gtpos(3, Int(j >= 1) + Int(k >= 1) + Int(l >= 1), Int(j >= 2) + Int(k >= 2) + Int(l >= 2)) + 1
 
-# the kernel for one matrix a (flat row-major, length 9); writes F[a,b] (3x3), J[a,b,c,d], H[a,b,c,d,e,f] if given
-function _geval!(k::Kind, order::Int, al::Float64, bt, a::Vector{W}, F, J, H) where {W}
+# the kernel for the matrix w.a (flat row-major); writes F[a,b] (3x3), J[a,b,c,d], H[a,b,c,d,e,f] if given
+function _geval!(w::_GWork{W}, k::Kind, order::Int, al::Float64, bt, F, J, H) where {W}
     nd = G_NDD[order+1]
+    a, As, S, xr, xi, mr, mi, ab = w.a, w.As, w.S, w.xr, w.xi, w.mr, w.mi, w.ab
+    @inbounds begin
     # ---- scaling, shift m, deviator S
     sig = k == SMF_EXP ? one(W) : _gpow2(maximum(abs, a))
     isig = 1 / sig
-    As = a .* isig
+    for i in 1:9
+        As[i] = a[i] * isig
+    end
     m = (As[1] + As[5] + As[9]) / 3
-    S = [i % 4 == 1 ? As[i] - m : As[i] for i in 1:9]
-    xr, xi = _groots(S)
-    mr, mi = m .+ xr, copy(xi)
+    smax = zero(W)
+    for i in 1:9
+        S[i] = i % 4 == 1 ? As[i] - m : As[i]
+        smax = max(smax, abs(S[i]))
+    end
+    _groots!(w)
+    for i in 1:3
+        mr[i], mi[i] = m + xr[i], xi[i]
+    end
     # ---- the pair x[2], x[3] from its sum and product with A itself (see gmf_kernel.hpp)
-    smax = maximum(abs, S)
     mid, Rp = (mr[2] + mr[3]) / 2, _cabs(mr[2] - mr[3], mi[2] - mi[3]) / 2
     small = abs(mid) + Rp <= abs(mr[1]) / 4
     aniso = abs(m) <= smax && Rp <= abs(mid - mr[1]) / 4
@@ -223,31 +275,35 @@ function _geval!(k::Kind, order::Int, al::Float64, bt, a::Vector{W}, F, J, H) wh
             mr[2], mi[2], mr[3], mi[3] = pcen, ps, pcen, -ps
         end
     end
-    ab = [pc, pc, pc]
-    og = [0.0, 1.0, 2.0]
     for i in 1:3
-        if ab[i]
+        ab[i] = pc
+        if pc
             xr[i], xi[i] = mr[i] - m, mi[i]
         end
     end
     # ---- node order: exp largest real part last; log, pow smallest modulus last; a conjugate pair stays adjacent
-    perm = [1, 2, 3]
+    perm = (1, 2, 3)
     if xi[2] != 0
-        _gkey(k, mr[1], mi[1]) <= _gkey(k, mr[2], mi[2]) || (perm = [2, 3, 1])
+        _gkey(k, mr[1], mi[1]) <= _gkey(k, mr[2], mi[2]) || (perm = (2, 3, 1))
     else
         for (p, q) in ((1, 2), (2, 3), (1, 2))
             if _gkey(k, mr[perm[p]], mi[perm[p]]) > _gkey(k, mr[perm[q]], mi[perm[q]])
-                perm[p], perm[q] = perm[q], perm[p]
+                perm = p == 1 ? (perm[2], perm[1], perm[3]) : (perm[1], perm[3], perm[2])
             end
         end
     end
-    xr, xi, mr, mi, ab, og = xr[perm], xi[perm], mr[perm], mi[perm], ab[perm], og[perm]
+    txr, txi, tmr, tmi, tab = (xr[1], xr[2], xr[3]), (xi[1], xi[2], xi[3]), (mr[1], mr[2], mr[3]), (mi[1], mi[2], mi[3]),
+                              (ab[1], ab[2], ab[3])
+    for i in 1:3
+        xr[i], xi[i], mr[i], mi[i], ab[i] = txr[perm[i]], txi[perm[i]], tmr[perm[i]], tmi[perm[i]], tab[perm[i]]
+    end
+    og = (perm[1] - 1.0, perm[2] - 1.0, perm[3] - 1.0)
     # ---- groups: all three, else the closest real / conjugate pair, else none
     rhoF = k == SMF_POW && 3.0 / al < G_RHO ? 3.0 / al : G_RHO
     cs = (xr[1] + xr[2] + xr[3]) / 3
     R3 = max(_cabs(xr[1] - cs, xi[1]), _cabs(xr[2] - cs, xi[2]), _cabs(xr[3] - cs, xi[3]))
     triple = _gok(k, m, rhoF, cs, R3)
-    psel = [false, false, false]
+    ps1, ps2, ps3 = false, false, false
     bestR = W(Inf)
     for (p, (i, j)) in enumerate(((1, 2), (1, 3), (2, 3)))
         kk = 6 - i - j
@@ -256,27 +312,27 @@ function _geval!(k::Kind, order::Int, al::Float64, bt, a::Vector{W}, F, J, H) wh
         okp = elig && _gok(k, m, rhoF, cc, R) && R <= G_RHO_POLE * _cabs(cc - xr[kk], -xi[kk]) && !triple
         if okp && R < bestR
             bestR = R
-            psel[1:p-1] .= false
-            psel[p] = true
+            ps1, ps2, ps3 = p == 1, p == 2, p == 3
         end
     end
-    inG = [triple || psel[1] || psel[2], triple || psel[1] || psel[3], triple || psel[2] || psel[3]]
-    pk = [psel[3], psel[2], psel[1]]
+    inG = (triple || ps1 || ps2, triple || ps1 || ps3, triple || ps2 || ps3)
+    pk = (ps3, ps2, ps1)
     # ---- group centre and offsets; the refined pair as a group: symmetric offsets
     gsum = count(inG)
     cxg = ((inG[1] ? xr[1] : zero(W)) + (inG[2] ? xr[2] : zero(W)) + (inG[3] ? xr[3] : zero(W))) / max(gsum, 1)
     cmu = m + cxg
-    is12 = og .> 0.5
+    is12 = (og[1] > 0.5, og[2] > 0.5, og[3] > 0.5)
     ovr = pc && gsum == 2 && ((inG[1] && inG[2] && is12[1] && is12[2]) || (inG[1] && inG[3] && is12[1] && is12[3]) ||
                               (inG[2] && inG[3] && is12[2] && is12[3]))
     if ovr
         cxg, cmu = pcen - m, pcen
     end
     dpr, dpi = preal ? ps : zero(W), preal ? zero(W) : ps
-    offr, offi = zeros(W, 3), zeros(W, 3)
+    offr, offi = w.offr, w.offi
     for i in 1:3
         neg = (mr[i] - pcen < 0) || (mi[i] < 0)
         dr, di = neg ? -dpr : dpr, neg ? -dpi : dpi
+        offr[i], offi[i] = zero(W), zero(W)
         if ovr && inG[i]
             mr[i], mi[i] = pcen + dr, di
             xr[i], xi[i] = mr[i] - m, mi[i]
@@ -299,31 +355,36 @@ function _geval!(k::Kind, order::Int, al::Float64, bt, a::Vector{W}, F, J, H) wh
         pk[kk] && (apole = (absc || ab[kk]) ? cmu - mr[kk] : cxg - xr[kk])
     end
     xshift = k == SMF_EXP ? max(xr[1], xr[2], xr[3]) : zero(W)
-    bad = k != SMF_EXP && any(i -> xi[i] == 0 && mr[i] <= 0, 1:3)
+    bad = k != SMF_EXP && ((xi[1] == 0 && mr[1] <= 0) || (xi[2] == 0 && mr[2] <= 0) || (xi[3] == 0 && mr[3] <= 0))
 
     # ---- divided differences: group part (Taylor series streamed over the series index)
-    Dr, Di = zeros(W, 19), zeros(W, 19)
-    hasg = any(inG)
-    if hasg
+    Dr, Di = w.Dr, w.Di
+    fill!(Dr, zero(W)); fill!(Di, zero(W))
+    if inG[1] || inG[2] || inG[3]
         L = k == SMF_EXP ? one(W) : (cmu > 0 ? cmu : one(W))
         iL = 1 / L
-        ur, ui = offr .* iL, offi .* iL
+        ur, ui = w.ur, w.ui
+        for i in 1:3
+            ur[i], ui[i] = offr[i] * iL, offi[i] * iL
+        end
         ap = abs(apole) > 0 ? apole * iL : one(W)
         iap = 1 / ap
         rr = max(_cabs(ur[1], ui[1]), _cabs(ur[2], ui[2]), _cabs(ur[3], ui[3]))
         rq0 = rr * abs(iap)
-        rq = any(pk) && rq0 <= 1 ? rq0 : zero(W)
+        rq = (pk[1] || pk[2] || pk[3]) && rq0 <= 1 ? rq0 : zero(W)
         rr = rr <= G_R_EXP + 0.5 ? rr : zero(W)
         K = _gnterms(bt, 3 * (order + 1) - 1, Float64(_val(rr)), Float64(_val(rq)))
         b0 = k == SMF_LOG ? _gcoef0(SMF_LOG, al, sig, m, cxg, zero(W), cmu, zero(W), 0)[1] : one(W)
-        Epr, Epi = zeros(W, nd), zeros(W, nd)
+        Epr, Epi, Ecr, Eci, accr, acci = w.Epr, w.Epi, w.Ecr, w.Eci, w.accr, w.acci
         for c in 1:nd
             par = G_TPAR[c]
-            if !inG[G_TNODE[c]]
+            if inG[G_TNODE[c]]
+                Epr[c], Epi[c] = zero(W), zero(W)
+            else
                 Epr[c], Epi[c] = par == 0 ? one(W) : Epr[par], par == 0 ? zero(W) : Epi[par]
             end
+            accr[c], acci[c] = zero(W), zero(W)
         end
-        Ecr, Eci, accr, acci = zeros(W, nd), zeros(W, nd), zeros(W, nd), zeros(W, nd)
         q1, q2, q3 = zero(W), zero(W), zero(W)
         for j in 0:K-1
             bj = j == 0 ? b0 : W(bt[j+1])
@@ -348,8 +409,9 @@ function _geval!(k::Kind, order::Int, al::Float64, bt, a::Vector{W}, F, J, H) wh
                 accr[c] += Ecr[c] * g
                 acci[c] += Eci[c] * g
             end
-            Epr .= Ecr
-            Epi .= Eci
+            for c in 1:nd
+                Epr[c], Epi[c] = Ecr[c], Eci[c]
+            end
         end
         for c in 1:nd
             ms = G_TMS[c]
@@ -370,69 +432,70 @@ function _geval!(k::Kind, order::Int, al::Float64, bt, a::Vector{W}, F, J, H) wh
     for i in 1:3
         inG[i] && continue
         xsr = k == SMF_EXP ? xr[i] - xshift : xr[i]
-        f0 = [_gcoef0(k, al, sig, m, xsr, xi[i], mr[i], mi[i], ko) for ko in 0:(k == SMF_POW ? order : 0)]
+        f00 = _gcoef0(k, al, sig, m, xsr, xi[i], mr[i], mi[i], 0)
+        f01 = k == SMF_POW && order >= 1 ? _gcoef0(k, al, sig, m, xsr, xi[i], mr[i], mi[i], 1) : f00
+        f02 = k == SMF_POW && order >= 2 ? _gcoef0(k, al, sig, m, xsr, xi[i], mr[i], mi[i], 2) : f00
         imr, imi = _cinv(mr[i], mi[i])
-        wr, wi = zeros(W, 3), zeros(W, 3)
-        for z in 1:3
-            z == i && continue
+        wz = ntuple(Val(3)) do z
+            z == i && return (zero(W), zero(W))
             useMu = ab[i] || ab[z]
-            wr[z], wi[z] = _cinv(useMu ? mr[i] - mr[z] : xr[i] - xr[z], useMu ? mi[i] - mi[z] : xi[i] - xi[z])
+            _cinv(useMu ? mr[i] - mr[z] : xr[i] - xr[z], useMu ? mi[i] - mi[z] : xi[i] - xi[z])
         end
         for c in 1:nd
             ms = G_TMS[c]
             mi_ = ms[i]
             mi_ == 0 && continue
-            fbr, fbi = k == SMF_POW ? f0[ms[1]] : f0[1]
+            fbr, fbi = k == SMF_POW ? (ms[1] == 1 ? f00 : (ms[1] == 2 ? f01 : f02)) : f00
             if k == SMF_EXP
-                sr = [fbr, fbr, fbr * 0.5]
-                si = [fbi, fbi, fbi * 0.5]
+                s0r, s0i, s1r, s1i, s2r, s2i = fbr, fbi, fbr, fbi, fbr * 0.5, fbi * 0.5
             elseif k == SMF_LOG
-                sr = [fbr, imr, (imr * imr - imi * imi) * -0.5]
-                si = [fbi, imi, (2 * imr * imi) * -0.5]
+                s0r, s0i, s1r, s1i = fbr, fbi, imr, imi
+                s2r, s2i = (imr * imr - imi * imi) * -0.5, (2 * imr * imi) * -0.5
             else
-                s1r, s1i = _cmul(fbr, fbi, imr, imi)
-                s1r, s1i = s1r * al, s1i * al
-                s2r, s2i = _cmul(s1r, s1i, imr, imi)
+                t1r, t1i = _cmul(fbr, fbi, imr, imi)
+                s1r, s1i = t1r * al, t1i * al
+                t2r, t2i = _cmul(s1r, s1i, imr, imi)
                 h = (al - 1.0) / 2.0
-                sr = [fbr, s1r, s2r * h]
-                si = [fbi, s1i, s2i * h]
+                s0r, s0i, s2r, s2i = fbr, fbi, t2r * h, t2i * h
             end
             for z in 1:3
                 mz = ms[z]
                 (z == i || mz == 0) && continue
+                wr, wi = wz[z]
                 pr, pim = one(W), zero(W)
                 for _ in 1:mz
-                    pr, pim = _cmul(pr, pim, wr[z], wi[z])
+                    pr, pim = _cmul(pr, pim, wr, wi)
                 end
-                t1r, t1i = _cmul(pr, pim, wr[z], wi[z])
+                t1r, t1i = _cmul(pr, pim, wr, wi)
                 p1r, p1i = t1r * -mz, t1i * -mz
-                t2r, t2i = _cmul(t1r, t1i, wr[z], wi[z])
+                t2r, t2i = _cmul(t1r, t1i, wr, wi)
                 p2r, p2i = t2r * (mz * (mz + 1) / 2.0), t2i * (mz * (mz + 1) / 2.0)
-                n0r, n0i = _cmul(sr[1], si[1], pr, pim)
-                a1r, a1i = _cmul(sr[2], si[2], pr, pim)
-                b1r, b1i = _cmul(sr[1], si[1], p1r, p1i)
-                a2r, a2i = _cmul(sr[3], si[3], pr, pim)
-                b2r, b2i = _cmul(sr[2], si[2], p1r, p1i)
-                c2r, c2i = _cmul(sr[1], si[1], p2r, p2i)
-                sr[1], si[1] = n0r, n0i
-                sr[2], si[2] = a1r + b1r, a1i + b1i
-                sr[3], si[3] = (a2r + b2r) + c2r, (a2i + b2i) + c2i
+                n0r, n0i = _cmul(s0r, s0i, pr, pim)
+                a1r, a1i = _cmul(s1r, s1i, pr, pim)
+                b1r, b1i = _cmul(s0r, s0i, p1r, p1i)
+                a2r, a2i = _cmul(s2r, s2i, pr, pim)
+                b2r, b2i = _cmul(s1r, s1i, p1r, p1i)
+                c2r, c2i = _cmul(s0r, s0i, p2r, p2i)
+                s0r, s0i = n0r, n0i
+                s1r, s1i = a1r + b1r, a1i + b1i
+                s2r, s2i = (a2r + b2r) + c2r, (a2i + b2i) + c2i
             end
-            Dr[c] += sr[mi_]
-            Di[c] += si[mi_]
+            Dr[c] += mi_ == 1 ? s0r : (mi_ == 2 ? s1r : s2r)
+            Di[c] += mi_ == 1 ? s0i : (mi_ == 2 ? s1i : s2i)
         end
     end
     # ---- real basis and assembly
     b0i, b1i = xi[1], xi[2]
-    B0 = [i % 4 == 1 ? (ab[1] ? As[i] - mr[1] : S[i] - xr[1]) : S[i] for i in 1:9]
-    B1 = [i % 4 == 1 ? (ab[2] ? As[i] - mr[2] : S[i] - xr[2]) : S[i] for i in 1:9]
-    r = zeros(W, 3, 9)                                   # r[m, k]: basis matrix m (I, B0, B0 B1 - b0 b1 I), entry k
+    B0, B1, r = w.B0, w.B1, w.r
     for i in 1:9
-        r[1, i] = i % 4 == 1 ? one(W) : zero(W)
-        r[2, i] = B0[i]
+        dg = i % 4 == 1
+        B0[i] = dg ? (ab[1] ? As[i] - mr[1] : S[i] - xr[1]) : S[i]
+        B1[i] = dg ? (ab[2] ? As[i] - mr[2] : S[i] - xr[2]) : S[i]
+        r[i] = dg ? one(W) : zero(W)                    # r[9 m + k]: basis matrix m (I, B0, B0 B1 - b0 b1 I)
+        r[9+i] = B0[i]
     end
     for i2 in 0:2, j2 in 0:2
-        r[3, 3i2+j2+1] = B0[3i2+1] * B1[j2+1] + B0[3i2+2] * B1[3+j2+1] + B0[3i2+3] * B1[6+j2+1] -
+        r[18+3i2+j2+1] = B0[3i2+1] * B1[j2+1] + B0[3i2+2] * B1[3+j2+1] + B0[3i2+3] * B1[6+j2+1] -
                          (i2 == j2 ? b0i * b1i : zero(W))
     end
     a01 = (ab[1] || ab[2]) ? mr[1] - mr[2] : xr[1] - xr[2]
@@ -444,52 +507,52 @@ function _geval!(k::Kind, order::Int, al::Float64, bt, a::Vector{W}, F, J, H) wh
     d2 = Dr[_gpos1(2)]
     for aa in 0:2, bb in 0:2
         kk = 3aa + bb + 1
-        F[aa+1, bb+1] = (d0 * r[1, kk] + d1 * r[2, kk] + d2 * r[3, kk]) * e * nanf
+        F[aa+1, bb+1] = (d0 * r[kk] + d1 * r[9+kk] + d2 * r[18+kk]) * e * nanf
     end
     order < 1 && return nothing
     sc1 = (k == SMF_EXP ? e : (k == SMF_LOG ? isig : one(W))) * nanf
-    Er = [Dr[_gpos2(j, l)] for j in 0:2, l in 0:2]
-    Ei = [Di[_gpos2(j, l)] for j in 0:2, l in 0:2]
-    for l in 1:3                                         # T on index 1
-        vr1, vr2, vr3, vi1, vi2, vi3 = Er[1, l], Er[2, l], Er[3, l], Ei[1, l], Ei[2, l], Ei[3, l]
-        Er[1, l] = vr1 - (N10 * vi2 + N20 * vi3); Er[2, l] = vr2 - N21 * vi3
-        Ei[1, l] = vi1 + (N10 * vr2 + N20 * vr3); Ei[2, l] = vi2 + N21 * vr3
+    E2r, E2i, D2, Y = w.E2r, w.E2i, w.D2, w.Y
+    for j in 0:2, l in 0:2
+        E2r[3j+l+1], E2i[3j+l+1] = Dr[_gpos2(j, l)], Di[_gpos2(j, l)]
     end
-    D2 = zeros(W, 3, 3)
-    for j in 1:3                                         # T on index 2, real part
-        D2[j, 1] = Er[j, 1] - (N10 * Ei[j, 2] + N20 * Ei[j, 3])
-        D2[j, 2] = Er[j, 2] - N21 * Ei[j, 3]
-        D2[j, 3] = Er[j, 3]
+    for l in 0:2                                         # T on index 1 (stride 3)
+        _gapplyT!(E2r, E2i, l, 3, N10, N20, N21)
     end
-    Y = [D2[mm, 1] * r[1, kk] + D2[mm, 2] * r[2, kk] + D2[mm, 3] * r[3, kk] for mm in 1:3, kk in 1:9]
+    for j in 0:2                                         # T on index 2 (stride 1), real part
+        D2[3j+1] = E2r[3j+1] - (N10 * E2i[3j+2] + N20 * E2i[3j+3])
+        D2[3j+2] = E2r[3j+2] - N21 * E2i[3j+3]
+        D2[3j+3] = E2r[3j+3]
+    end
+    for mm in 0:2, kk in 1:9
+        Y[9mm+kk] = D2[3mm+1] * r[kk] + D2[3mm+2] * r[9+kk] + D2[3mm+3] * r[18+kk]
+    end
     for aa in 0:2, bb in 0:2, cc in 0:2, dd in 0:2
         i1, i2 = 3aa + cc + 1, 3dd + bb + 1
-        J[aa+1, bb+1, cc+1, dd+1] = (r[1, i1] * Y[1, i2] + r[2, i1] * Y[2, i2] + r[3, i1] * Y[3, i2]) * sc1
+        J[aa+1, bb+1, cc+1, dd+1] = (r[i1] * Y[i2] + r[9+i1] * Y[9+i2] + r[18+i1] * Y[18+i2]) * sc1
     end
     order < 2 && return nothing
     sc2 = (k == SMF_EXP ? e : (k == SMF_LOG ? isig * isig : one(W))) * nanf
-    E3r = [Dr[_gpos3(j, l, p)] for j in 0:2, l in 0:2, p in 0:2]
-    E3i = [Di[_gpos3(j, l, p)] for j in 0:2, l in 0:2, p in 0:2]
-    for ax in 1:3                                        # T on each index
-        for o1 in 1:3, o2 in 1:3
-            idx = ax == 1 ? ((1, o1, o2), (2, o1, o2), (3, o1, o2)) :
-                  ax == 2 ? ((o1, 1, o2), (o1, 2, o2), (o1, 3, o2)) : ((o1, o2, 1), (o1, o2, 2), (o1, o2, 3))
-            vr = (E3r[idx[1]...], E3r[idx[2]...], E3r[idx[3]...])
-            vi = (E3i[idx[1]...], E3i[idx[2]...], E3i[idx[3]...])
-            E3r[idx[1]...] = vr[1] - (N10 * vi[2] + N20 * vi[3]); E3r[idx[2]...] = vr[2] - N21 * vi[3]
-            E3i[idx[1]...] = vi[1] + (N10 * vr[2] + N20 * vr[3]); E3i[idx[2]...] = vi[2] + N21 * vr[3]
-        end
+    E3r, E3i, Z, Yh = w.E3r, w.E3i, w.Z, w.Yh
+    for j in 0:2, l in 0:2, p in 0:2
+        E3r[9j+3l+p+1], E3i[9j+3l+p+1] = Dr[_gpos3(j, l, p)], Di[_gpos3(j, l, p)]
     end
-    Z = [E3r[mm, nn, 1] * r[1, kk] + E3r[mm, nn, 2] * r[2, kk] + E3r[mm, nn, 3] * r[3, kk] for mm in 1:3, nn in 1:3, kk in 1:9]
-    Yh = [r[1, de] * Z[mm, 1, fb] + r[2, de] * Z[mm, 2, fb] + r[3, de] * Z[mm, 3, fb] for mm in 1:3, de in 1:9, fb in 1:9]
+    for s in (9, 3, 1), base in 0:26                    # T on each index
+        (base ÷ s) % 3 == 0 && _gapplyT!(E3r, E3i, base, s, N10, N20, N21)
+    end
+    for mn in 0:8, kk in 1:9                            # Z[mn][k] = sum_p D3[mn p] r[p][k]
+        Z[9mn+kk] = E3r[3mn+1] * r[kk] + E3r[3mn+2] * r[9+kk] + E3r[3mn+3] * r[18+kk]
+    end
+    for mm in 0:2, de in 0:8, fb in 1:9                 # Yh[m][de fb] = sum_n r[n][de] Z[mn][fb]
+        Yh[81mm+9de+fb] = r[de+1] * Z[9(3mm)+fb] + r[9+de+1] * Z[9(3mm+1)+fb] + r[18+de+1] * Z[9(3mm+2)+fb]
+    end
     for aa in 0:2, bb in 0:2, cc in 0:2, dd in 0:2, ee in 0:2, ff in 0:2
         ac, ae = 3aa + cc + 1, 3aa + ee + 1
-        de1, fb1 = 3dd + ee + 1, 3ff + bb + 1
-        fc2, db2 = 3ff + cc + 1, 3dd + bb + 1
-        h = r[1, ac] * Yh[1, de1, fb1] + r[2, ac] * Yh[2, de1, fb1] + r[3, ac] * Yh[3, de1, fb1] +
-            r[1, ae] * Yh[1, fc2, db2] + r[2, ae] * Yh[2, fc2, db2] + r[3, ae] * Yh[3, fc2, db2]
+        i1, i2 = 9(3dd + ee) + 3ff + bb + 1, 9(3ff + cc) + 3dd + bb + 1
+        h = r[ac] * Yh[i1] + r[9+ac] * Yh[81+i1] + r[18+ac] * Yh[162+i1] +
+            r[ae] * Yh[i2] + r[9+ae] * Yh[81+i2] + r[18+ae] * Yh[162+i2]
         H[aa+1, bb+1, cc+1, dd+1, ee+1, ff+1] = h * sc2
     end
+    end # @inbounds
     return nothing
 end
 
@@ -531,6 +594,22 @@ function _glayout(A)
     throw(DimensionMismatch("expected a matrix 3 x 3 or 3 x 3 x n, got size $sz"))
 end
 
+# matrices lo..hi of A (batch: the last index) with the workspace w
+function _grange!(w::_GWork, k, order, al, bt, F, J, H, A, lo, hi, ::Val{B}) where {B}
+    @inbounds for i in lo:hi
+        for r in 1:3, c in 1:3
+            w.a[3(r-1)+c] = B ? A[r, c, i] : A[r, c]
+        end
+        if B
+            _geval!(w, k, order, al, bt, _last(F, i), J === nothing ? nothing : _last(J, i),
+                    H === nothing ? nothing : _last(H, i))
+        else
+            _geval!(w, k, order, al, bt, F, J, H)
+        end
+    end
+    return nothing
+end
+
 """
     gmf!(F, J, H, kind, A; alpha=0.0) -> F
 
@@ -551,24 +630,18 @@ function gmf!(F::AbstractArray, J::Union{Nothing,AbstractArray}, H::Union{Nothin
     T = _wtype(eltype(A))
     if n === nothing
         _chkout(F, J, H, (3, 3), (3, 3, 3, 3), (3, 3, 3, 3, 3, 3))
-        _geval!(k, order, al, bt, T[A[r, c] for r in 1:3 for c in 1:3], F, J, H)
+        _grange!(_GWork{T}(), k, order, al, bt, F, J, H, A, 1, 1, Val(false))
         return F
     end
     _chkout(F, J, H, (3, 3, n), (3, 3, 3, 3, n), (3, 3, 3, 3, 3, 3, n))
-    work(i) = _geval!(k, order, al, bt, T[A[r, c, i] for r in 1:3 for c in 1:3], _last(F, i),
-                      J === nothing ? nothing : _last(J, i), H === nothing ? nothing : _last(H, i))
     chunk = H === nothing ? 1024 : 256
     nchunks = cld(n, chunk)
     if nchunks <= 1 || Threads.nthreads() == 1
-        for i in 1:n
-            work(i)
-        end
+        _grange!(_GWork{T}(), k, order, al, bt, F, J, H, A, 1, n, Val(true))
     else
-        Threads.@threads :dynamic for ic in 1:nchunks
+        Threads.@threads :dynamic for ic in 1:nchunks      # one workspace per chunk
             lo = (ic - 1) * chunk + 1
-            for i in lo:min(n, lo + chunk - 1)
-                work(i)
-            end
+            _grange!(_GWork{T}(), k, order, al, bt, F, J, H, A, lo, min(n, lo + chunk - 1), Val(true))
         end
     end
     return F
