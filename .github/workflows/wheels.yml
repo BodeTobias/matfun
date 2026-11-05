@@ -32,6 +32,8 @@ jobs:
           # one wheel per platform (py3-none-<platform>, no CPython extension): build with one interpreter only
           CIBW_BUILD: cp313-*
           CIBW_SKIP: "*-musllinux_*"
+          # 64 bit only (no win32 / i686): the XLA FFI headers assume 64-bit pointers, and jaxlib has no 32-bit wheels
+          CIBW_ARCHS: auto64
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_TEST_EXTRAS: test
