@@ -275,6 +275,62 @@ function _geval!(w::_GWork{W}, k::Kind, order::Int, al::Float64, bt, F, J, H) wh
             mr[2], mi[2], mr[3], mi[3] = pcen, ps, pcen, -ps
         end
     end
+    # ---- a conjugate pair near the negative real axis (log, powers): f jumps between its two nodes, so the result
+    #      depends on the imaginary part beta itself. The pair from the 2x2 block of the deviator on its invariant
+    #      subspace (orthogonal complement of the left eigenvector u of the real eigenvalue mr[1]):
+    #      beta^2 = -(d^2 + b12 b21), d = (b11 - b22)/2, without the cancellation of the discriminant. The real node
+    #      is ordered first (below)
+    # (decided after the refinement above: a small pair next to a large eigenvalue has an inaccurate centre in x)
+    cut = k != SMF_EXP && mr[2] + mr[3] < 0
+    if cut
+        pc || _gnewton!(As, mr, mi, 1)
+        l0 = mr[1]
+        M = w.Sp                                            # (free after _groots!): A - mu0 I, row-major
+        for i in 1:9
+            M[i] = i % 4 == 1 ? As[i] - l0 : As[i]
+        end
+        u0, u1, u2, nn = zero(W), zero(W), zero(W), -one(W)
+        for (i, j) in ((0, 1), (0, 2), (1, 2))              # the largest cross product of two columns
+            v0 = M[3+i+1] * M[6+j+1] - M[6+i+1] * M[3+j+1]
+            v1 = M[6+i+1] * M[j+1] - M[i+1] * M[6+j+1]
+            v2 = M[i+1] * M[3+j+1] - M[3+i+1] * M[j+1]
+            n2 = v0 * v0 + v1 * v1 + v2 * v2
+            if n2 > nn
+                u0, u1, u2, nn = v0, v1, v2, n2
+            end
+        end
+        if nn > 0
+            iu = 1 / sqrt(nn)
+            u0, u1, u2 = u0 * iu, u1 * iu, u2 * iu
+            a0, a1, a2 = abs(u0), abs(u1), abs(u2)
+            k1 = a1 < a0
+            k2 = a2 < (k1 ? a1 : a0)
+            ex, ey, ez = (k1 || k2) ? zero(W) : one(W), (k1 && !k2) ? one(W) : zero(W), k2 ? one(W) : zero(W)
+            eu = ex * u0 + ey * u1 + ez * u2
+            q0, q1, q2 = ex - eu * u0, ey - eu * u1, ez - eu * u2
+            iq = 1 / sqrt(q0 * q0 + q1 * q1 + q2 * q2)
+            q0, q1, q2 = q0 * iq, q1 * iq, q2 * iq
+            r0, r1, r2 = u1 * q2 - u2 * q1, u2 * q0 - u0 * q2, u0 * q1 - u1 * q0
+            sq0, sq1, sq2 = S[1] * q0 + S[2] * q1 + S[3] * q2, S[4] * q0 + S[5] * q1 + S[6] * q2,
+                            S[7] * q0 + S[8] * q1 + S[9] * q2
+            sr0, sr1, sr2 = S[1] * r0 + S[2] * r1 + S[3] * r2, S[4] * r0 + S[5] * r1 + S[6] * r2,
+                            S[7] * r0 + S[8] * r1 + S[9] * r2
+            b11, b12 = q0 * sq0 + q1 * sq1 + q2 * sq2, q0 * sr0 + q1 * sr1 + q2 * sr2
+            b21, b22 = r0 * sq0 + r1 * sq1 + r2 * sq2, r0 * sr0 + r1 * sr1 + r2 * sr2
+            dd = (b11 - b22) / 2
+            beta2 = -(dd * dd + b12 * b21)
+            cc = m + (b11 + b22) / 2
+            be = sqrt(abs(beta2))
+            preal = beta2 <= 0
+            pcen, ps = cc, be
+            if preal
+                mr[2], mi[2], mr[3], mi[3] = cc + be, zero(W), cc - be, zero(W)
+            else
+                mr[2], mi[2], mr[3], mi[3] = cc, be, cc, -be
+            end
+            pc = true
+        end
+    end
     for i in 1:3
         ab[i] = pc
         if pc
@@ -284,7 +340,8 @@ function _geval!(w::_GWork{W}, k::Kind, order::Int, al::Float64, bt, F, J, H) wh
     # ---- node order: exp largest real part last; log, pow smallest modulus last; a conjugate pair stays adjacent
     perm = (1, 2, 3)
     if xi[2] != 0
-        _gkey(k, mr[1], mi[1]) <= _gkey(k, mr[2], mi[2]) || (perm = (2, 3, 1))
+        # real node first or last; first for a pair near the negative real axis (see above)
+        cut || _gkey(k, mr[1], mi[1]) <= _gkey(k, mr[2], mi[2]) || (perm = (2, 3, 1))
     else
         for (p, q) in ((1, 2), (2, 3), (1, 2))
             if _gkey(k, mr[perm[p]], mi[perm[p]]) > _gkey(k, mr[perm[q]], mi[perm[q]])

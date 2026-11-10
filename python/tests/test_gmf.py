@@ -146,3 +146,22 @@ def test_gmf_shapes_and_errors():
         matfun.gmf("cosh", A)
     with pytest.raises(ValueError):
         matfun.gmf("exp", A, order=3)
+
+
+@pytest.mark.parametrize("deg", [170.0, 179.0, 179.9, 179.999, 179.99999])
+def test_gmf_rotations_near_180(deg):
+    """log and sqrt of rotations close to 180 degrees (complex pair next to the branch cut of the principal branch):
+    log R = theta K, sqrt R = rotation by theta / 2 (closed forms), in an orthonormal and a non-normal basis; the
+    error stays at the level of the condition number ~ 1 / (pi - theta)"""
+    th = np.radians(deg)
+    k = np.array([1.0, 2.0, 3.0]) / np.sqrt(14.0)
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    rot = lambda t: np.eye(3) + np.sin(t) * K + (1 - np.cos(t)) * K @ K
+    X = np.eye(3) + 0.3 * np.random.default_rng(4).standard_normal((3, 3))
+    tol = 50 * np.finfo(float).eps / (np.pi - th)
+    for Bm in (np.eye(3), X):
+        Bi = np.linalg.inv(Bm)
+        R = Bm @ rot(th) @ Bi
+        assert relerr(matfun.gmf("log", R), Bm @ (th * K) @ Bi) < tol
+        assert relerr(matfun.gmf("sqrt", R), Bm @ rot(th / 2) @ Bi) < tol
+        assert relerr(matfun.gmf("pow", R, 0.25), Bm @ rot(th / 4) @ Bi) < tol

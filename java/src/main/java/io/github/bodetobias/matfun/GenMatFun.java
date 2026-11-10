@@ -34,6 +34,9 @@ public final class GenMatFun {
   private static final int[] TPAR = {-1, 0, 1, 0, 1, 2, 4, 5, 7, 3, 4, 5, 6, 7, 8, 12, 13, 14, 17};
   private static final int[] TNODE = {0, 1, 2, 0, 0, 0, 1, 1, 2, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2};
   private static final int[] NDD = {3, 9, 19};
+  private static final int[][] NET = {{0, 1}, {1, 2}, {0, 1}};        // stable sorting network of 3 elements
+  private static final int[] PI_ = {0, 0, 1}, PJ_ = {1, 2, 2};       // the pairs (0,1), (0,2), (1,2)
+  private static final int[] STR = {9, 3, 1};                         // strides of the indices of D3
   private static final double[] B_EXP = seriesCoef(EXP, 0.0), B_LOG = seriesCoef(LOG, 0.0), B_SQRT = seriesCoef(POW, 0.5);
 
   /** scratch arrays of one thread */
@@ -42,6 +45,18 @@ public final class GenMatFun {
     final double[] accr = new double[19], acci = new double[19], Dr = new double[19], Di = new double[19];
     final double[] c = new double[2], f = new double[6];
     final double[] Y = new double[27], Z = new double[81], Yh = new double[243];
+    final double[] As = new double[9], S = new double[9], Sp = new double[9];
+    final double[] xr = new double[3], xi = new double[3], mr = new double[3], mi = new double[3], og = new double[3];
+    final double[] txr = new double[3], txi = new double[3], tmr = new double[3], tmi = new double[3];
+    final double[] tog = new double[3];
+    final boolean[] ab = new boolean[3], tab = new boolean[3], psel = new boolean[3], inG = new boolean[3];
+    final boolean[] pk = new boolean[3], is12 = new boolean[3];
+    final int[] perm = new int[3];
+    final double[] offr = new double[3], offi = new double[3], ur = new double[3], ui = new double[3];
+    final double[] q = new double[4], wr = new double[3], wi = new double[3], sr = new double[3], si = new double[3];
+    final double[] B0 = new double[9], B1 = new double[9], r = new double[27], D2 = new double[9];
+    final double[] E2r = new double[9], E2i = new double[9], D3 = new double[27], E3r = new double[27];
+    final double[] E3i = new double[27];
     double[] bPow;
     double bAl = Double.NaN;
 
@@ -171,19 +186,21 @@ public final class GenMatFun {
   // det (M - s I) by elimination with partial pivoting (backward stable, exact pivots for diagonal M)
   private static double detLu(double[] M, double s) {
     final double m0 = M[0] - s, m4 = M[4] - s, m8 = M[8] - s;
-    final double[] r0 = {m0, M[1], M[2]}, r1 = {M[3], m4, M[5]}, r2 = {M[6], M[7], m8};
-    final double a0 = Math.abs(r0[0]), a1 = Math.abs(r1[0]), a2 = Math.abs(r2[0]);
+    final double a0 = Math.abs(m0), a1 = Math.abs(M[3]), a2 = Math.abs(M[6]);
     final boolean p1 = a1 > a0 && a1 >= a2, p2 = a2 > a0 && a2 > a1;
-    final double[] P = p1 ? r1 : (p2 ? r2 : r0), R1 = (p1 || p2) ? r0 : r1, R2 = p2 ? r1 : r2;
+    // pivot row P, the others R1, R2 (rows r0 = (m0, M1, M2), r1 = (M3, m4, M5), r2 = (M6, M7, m8))
+    final double P0 = p1 ? M[3] : (p2 ? M[6] : m0), P1 = p1 ? m4 : (p2 ? M[7] : M[1]), P2 = p1 ? M[5] : (p2 ? m8 : M[2]);
+    final double R10 = (p1 || p2) ? m0 : M[3], R11 = (p1 || p2) ? M[1] : m4, R12 = (p1 || p2) ? M[2] : M[5];
+    final double R20 = p2 ? M[3] : M[6], R21 = p2 ? m4 : M[7], R22 = p2 ? M[5] : m8;
     double sgn = p1 ? -1.0 : 1.0;
-    final double piv = P[0] != 0 ? P[0] : 1.0;
-    final double l1 = R1[0] / piv, l2 = R2[0] / piv;
-    final double b = R1[1] - l1 * P[1], c = R1[2] - l1 * P[2], d = R2[1] - l2 * P[1], e = R2[2] - l2 * P[2];
+    final double piv = P0 != 0 ? P0 : 1.0;
+    final double l1 = R10 / piv, l2 = R20 / piv;
+    final double b = R11 - l1 * P1, c = R12 - l1 * P2, d = R21 - l2 * P1, e = R22 - l2 * P2;
     final boolean sw = Math.abs(d) > Math.abs(b);
     final double bb = sw ? d : b, cc = sw ? e : c, dd = sw ? b : d, ee = sw ? c : e;
     if (sw) sgn = -sgn;
-    if (P[0] == 0 || bb == 0) return 0.0;
-    return sgn * P[0] * bb * (ee - dd / bb * cc);
+    if (P0 == 0 || bb == 0) return 0.0;
+    return sgn * P0 * bb * (ee - dd / bb * cc);
   }
 
   private static double minors2(double[] M) {
@@ -191,9 +208,8 @@ public final class GenMatFun {
   }
 
   // eigenvalues of S (see roots3): x[0] real (re in xr, im in xi)
-  private static void roots3(double[] S, double[] xr, double[] xi) {
+  private static void roots3(double[] S, double[] Sp, double[] xr, double[] xi) {
     final double tau = (S[0] + S[4] + S[8]) / 3.0;
-    final double[] Sp = new double[9];
     for (int k = 0; k < 9; k++) Sp[k] = k % 4 == 0 ? S[k] - tau : S[k];
     double s = Math.abs(Sp[0]);
     for (int k = 1; k < 9; k++) s = Math.max(s, Math.abs(Sp[k]));
@@ -293,12 +309,12 @@ public final class GenMatFun {
     double amax = 0;
     for (int k = 0; k < 9; k++) amax = Math.max(amax, Math.abs(a[ao + k]));
     final double sig = kind == EXP ? 1.0 : pow2safe(amax), isig = 1.0 / sig;
-    final double[] As = new double[9], S = new double[9];
+    final double[] As = w.As, S = w.S;
     for (int k = 0; k < 9; k++) As[k] = a[ao + k] * isig;
     final double m = (As[0] + As[4] + As[8]) / 3.0;
     for (int k = 0; k < 9; k++) S[k] = k % 4 == 0 ? As[k] - m : As[k];
-    final double[] xr = new double[3], xi = new double[3], mr = new double[3], mi = new double[3];
-    roots3(S, xr, xi);
+    final double[] xr = w.xr, xi = w.xi, mr = w.mr, mi = w.mi;
+    roots3(S, w.Sp, xr, xi);
     for (int i = 0; i < 3; i++) { mr[i] = m + xr[i]; mi[i] = xi[i]; }
     // ---- the pair x[1], x[2] from its sum and product with A itself (see gmf_kernel.hpp)
     double smax = 0;
@@ -306,7 +322,7 @@ public final class GenMatFun {
     final double mid = 0.5 * (mr[1] + mr[2]), Rp = 0.5 * cabs(mr[1] - mr[2], mi[1] - mi[2]);
     final boolean small = Math.abs(mid) + Rp <= 0.25 * Math.abs(mr[0]);
     final boolean aniso = Math.abs(m) <= smax && Rp <= 0.25 * Math.abs(mid - mr[0]);
-    final boolean pc = mr[0] != 0 && (small || aniso);
+    boolean pc = mr[0] != 0 && (small || aniso);
     double pcen = 0, ps = 0;
     boolean preal = true;
     if (pc) {
@@ -333,17 +349,67 @@ public final class GenMatFun {
         mr[1] = pcen; mi[1] = ps; mr[2] = pcen; mi[2] = -ps;
       }
     }
-    final boolean[] ab = {pc, pc, pc};
-    double[] og = {0.0, 1.0, 2.0};
+    // ---- a conjugate pair near the negative real axis (log, powers): f jumps between its two nodes, so the result
+    //      depends on the imaginary part beta itself. The pair from the 2x2 block of the deviator on its invariant
+    //      subspace (orthogonal complement of the left eigenvector u of the real eigenvalue mr[0]):
+    //      beta^2 = -(d^2 + b12 b21), d = (b11 - b22)/2, without the cancellation of the discriminant. The real node
+    //      is ordered first (below)
+    // (decided after the refinement above: a small pair next to a large eigenvalue has an inaccurate centre in x)
+    final boolean cut = kind != EXP && mr[1] + mr[2] < 0;
+    if (cut) {
+      if (!pc) newton(As, mr, mi, 0, c);
+      final double l0 = mr[0];
+      final double c00 = As[0] - l0, c11 = As[4] - l0, c22 = As[8] - l0;   // columns of A - mu0 I
+      final double[] M = w.Sp;                            // (free after roots3)
+      M[0] = c00; M[1] = As[1]; M[2] = As[2]; M[3] = As[3]; M[4] = c11; M[5] = As[5]; M[6] = As[6]; M[7] = As[7];
+      M[8] = c22;
+      double u0 = 0, u1 = 0, u2 = 0, nn = -1;
+      for (int p = 0; p < 3; p++) {                        // the largest cross product of two columns
+        final int i = PI_[p], j = PJ_[p];
+        final double v0 = M[3 + i] * M[6 + j] - M[6 + i] * M[3 + j], v1 = M[6 + i] * M[j] - M[i] * M[6 + j];
+        final double v2 = M[i] * M[3 + j] - M[3 + i] * M[j], n2 = v0 * v0 + v1 * v1 + v2 * v2;
+        if (n2 > nn) { u0 = v0; u1 = v1; u2 = v2; nn = n2; }
+      }
+      if (nn > 0) {
+        final double iu = 1.0 / Math.sqrt(nn);
+        u0 *= iu; u1 *= iu; u2 *= iu;
+        final double a0 = Math.abs(u0), a1 = Math.abs(u1), a2 = Math.abs(u2);
+        final boolean k1 = a1 < a0, k2 = a2 < (k1 ? a1 : a0);
+        final double ex = (k1 || k2) ? 0.0 : 1.0, ey = (k1 && !k2) ? 1.0 : 0.0, ez = k2 ? 1.0 : 0.0;
+        final double eu = ex * u0 + ey * u1 + ez * u2;
+        double q0 = ex - eu * u0, q1 = ey - eu * u1, q2 = ez - eu * u2;
+        final double iq = 1.0 / Math.sqrt(q0 * q0 + q1 * q1 + q2 * q2);
+        q0 *= iq; q1 *= iq; q2 *= iq;
+        final double r0 = u1 * q2 - u2 * q1, r1 = u2 * q0 - u0 * q2, r2 = u0 * q1 - u1 * q0;
+        final double sq0 = S[0] * q0 + S[1] * q1 + S[2] * q2, sq1 = S[3] * q0 + S[4] * q1 + S[5] * q2;
+        final double sq2 = S[6] * q0 + S[7] * q1 + S[8] * q2;
+        final double sr0 = S[0] * r0 + S[1] * r1 + S[2] * r2, sr1 = S[3] * r0 + S[4] * r1 + S[5] * r2;
+        final double sr2 = S[6] * r0 + S[7] * r1 + S[8] * r2;
+        final double b11 = q0 * sq0 + q1 * sq1 + q2 * sq2, b12 = q0 * sr0 + q1 * sr1 + q2 * sr2;
+        final double b21 = r0 * sq0 + r1 * sq1 + r2 * sq2, b22 = r0 * sr0 + r1 * sr1 + r2 * sr2;
+        final double dd = 0.5 * (b11 - b22), beta2 = -(dd * dd + b12 * b21), cc = m + 0.5 * (b11 + b22);
+        final double be = Math.sqrt(Math.abs(beta2));
+        preal = beta2 <= 0;
+        pcen = cc;
+        ps = be;
+        if (preal) { mr[1] = cc + be; mi[1] = 0.0; mr[2] = cc - be; mi[2] = 0.0; }
+        else { mr[1] = cc; mi[1] = be; mr[2] = cc; mi[2] = -be; }
+        pc = true;
+      }
+    }
+    final boolean[] ab = w.ab;
+    final double[] og = w.og;
+    for (int i = 0; i < 3; i++) { ab[i] = pc; og[i] = i; }
     for (int i = 0; i < 3; i++)
       if (ab[i]) { xr[i] = mr[i] - m; xi[i] = mi[i]; }
     // ---- node order: exp largest real part last; log, pow smallest modulus last; a conjugate pair stays adjacent
     {
-      final int[] perm = {0, 1, 2};
+      final int[] perm = w.perm;
+      perm[0] = 0; perm[1] = 1; perm[2] = 2;
       if (xi[1] != 0) {
-        if (!(key(kind, mr[0], mi[0]) <= key(kind, mr[1], mi[1]))) { perm[0] = 1; perm[1] = 2; perm[2] = 0; }
+        // real node first or last; first for a pair near the negative real axis (see above)
+        if (!cut && !(key(kind, mr[0], mi[0]) <= key(kind, mr[1], mi[1]))) { perm[0] = 1; perm[1] = 2; perm[2] = 0; }
       } else {
-        final int[][] NET = {{0, 1}, {1, 2}, {0, 1}};
         for (int[] p : NET)
           if (key(kind, mr[perm[p[0]]], mi[perm[p[0]]]) > key(kind, mr[perm[p[1]]], mi[perm[p[1]]])) {
             final int t = perm[p[0]];
@@ -351,8 +417,9 @@ public final class GenMatFun {
             perm[p[1]] = t;
           }
       }
-      final double[] txr = xr.clone(), txi = xi.clone(), tmr = mr.clone(), tmi = mi.clone(), tog = og.clone();
-      final boolean[] tab = ab.clone();
+      final double[] txr = w.txr, txi = w.txi, tmr = w.tmr, tmi = w.tmi, tog = w.tog;
+      final boolean[] tab = w.tab;
+      for (int i = 0; i < 3; i++) { txr[i] = xr[i]; txi[i] = xi[i]; tmr[i] = mr[i]; tmi[i] = mi[i]; tog[i] = og[i]; tab[i] = ab[i]; }
       for (int k = 0; k < 3; k++) {
         xr[k] = txr[perm[k]]; xi[k] = txi[perm[k]]; mr[k] = tmr[perm[k]]; mi[k] = tmi[perm[k]];
         ab[k] = tab[perm[k]]; og[k] = tog[perm[k]];
@@ -363,9 +430,9 @@ public final class GenMatFun {
     final double cs = (xr[0] + xr[1] + xr[2]) / 3.0;
     final double R3 = Math.max(Math.max(cabs(xr[0] - cs, xi[0]), cabs(xr[1] - cs, xi[1])), cabs(xr[2] - cs, xi[2]));
     final boolean triple = okF(kind, m, rhoF, cs, R3);
-    final boolean[] psel = new boolean[3];
+    final boolean[] psel = w.psel;
+    psel[0] = psel[1] = psel[2] = false;
     double bestR = Double.POSITIVE_INFINITY;
-    final int[] PI_ = {0, 0, 1}, PJ_ = {1, 2, 2};
     for (int p = 0; p < 3; p++) {
       final int i = PI_[p], j = PJ_[p], k = 3 - i - j;
       final boolean elig = (xi[i] == 0 && xi[j] == 0) || (xr[i] == xr[j] && xi[i] == -xi[j]);
@@ -378,18 +445,21 @@ public final class GenMatFun {
       }
       psel[p] = better;
     }
-    final boolean[] inG = {triple || psel[0] || psel[1], triple || psel[0] || psel[2], triple || psel[1] || psel[2]};
-    final boolean[] pk = {psel[2], psel[1], psel[0]};
+    final boolean[] inG = w.inG, pk = w.pk;
+    inG[0] = triple || psel[0] || psel[1]; inG[1] = triple || psel[0] || psel[2]; inG[2] = triple || psel[1] || psel[2];
+    pk[0] = psel[2]; pk[1] = psel[1]; pk[2] = psel[0];
     // ---- group centre and offsets; the refined pair as a group: symmetric offsets
     final int gsum = (inG[0] ? 1 : 0) + (inG[1] ? 1 : 0) + (inG[2] ? 1 : 0);
     double cxg = ((inG[0] ? xr[0] : 0.0) + (inG[1] ? xr[1] : 0.0) + (inG[2] ? xr[2] : 0.0)) / (gsum > 0 ? gsum : 1);
     double cmu = m + cxg;
-    final boolean[] is12 = {og[0] > 0.5, og[1] > 0.5, og[2] > 0.5};
+    final boolean[] is12 = w.is12;
+    for (int i = 0; i < 3; i++) is12[i] = og[i] > 0.5;
     final boolean ovr = pc && gsum == 2 && ((inG[0] && inG[1] && is12[0] && is12[1]) || (inG[0] && inG[2] && is12[0]
         && is12[2]) || (inG[1] && inG[2] && is12[1] && is12[2]));
     if (ovr) { cxg = pcen - m; cmu = pcen; }
     final double dpr = preal ? ps : 0.0, dpi = preal ? 0.0 : ps;
-    final double[] offr = new double[3], offi = new double[3];
+    final double[] offr = w.offr, offi = w.offi;
+    for (int i = 0; i < 3; i++) { offr[i] = 0.0; offi[i] = 0.0; }
     for (int i = 0; i < 3; i++) {
       final boolean neg = (mr[i] - pcen < 0) || (mi[i] < 0);
       final double dr = neg ? -dpr : dpr, di = neg ? -dpi : dpi;
@@ -422,7 +492,7 @@ public final class GenMatFun {
     final double[] Dr = w.Dr, Di = w.Di;
     final boolean hasg = inG[0] || inG[1] || inG[2];
     final double L = kind == EXP ? 1.0 : (hasg && cmu > 0 ? cmu : 1.0), iL = 1.0 / L;
-    final double[] ur = new double[3], ui = new double[3];
+    final double[] ur = w.ur, ui = w.ui;
     for (int i = 0; i < 3; i++) { ur[i] = offr[i] * iL; ui[i] = offi[i] * iL; }
     final double ap = Math.abs(apole) > 0 ? apole * iL : 1.0, iap = 1.0 / ap;
     double rr = Math.max(cabs(ur[0], ui[0]), Math.max(cabs(ur[1], ui[1]), cabs(ur[2], ui[2])));
@@ -446,7 +516,7 @@ public final class GenMatFun {
         acci[cc] = 0.0;
       }
       double q1 = 0.0, q2 = 0.0, q3 = 0.0;
-      final double[] q = new double[4];
+      final double[] q = w.q;
       for (int j = 0; j < K; j++) {
         final double bj = j == 0 ? b0 : bt[j];
         final double g1 = (bj - q1) * iap, g2 = (g1 - q2) * iap, g3 = (g2 - q3) * iap;
@@ -496,7 +566,7 @@ public final class GenMatFun {
       }
       cinv(mr[i], mi[i], c);
       final double imr = c[0], imi = c[1];
-      final double[] wr = new double[3], wi = new double[3];
+      final double[] wr = w.wr, wi = w.wi;
       for (int z = 0; z < 3; z++)
         if (z != i) {
           final boolean useMu = ab[i] || ab[z];
@@ -509,7 +579,7 @@ public final class GenMatFun {
         if (mi_ == 0) continue;
         final int k = TMS[cc][0] - 1;
         final double fbr = kind == POW ? f0[2 * k] : f0[0], fbi = kind == POW ? f0[2 * k + 1] : f0[1];
-        final double[] sr = new double[3], si = new double[3];
+        final double[] sr = w.sr, si = w.si;
         sr[0] = fbr;
         si[0] = fbi;
         if (kind == EXP) {
@@ -548,7 +618,7 @@ public final class GenMatFun {
     }
     // ---- real basis and assembly
     final double b0i = xi[0], b1i = xi[1];
-    final double[] B0 = new double[9], B1 = new double[9], r = new double[27];
+    final double[] B0 = w.B0, B1 = w.B1, r = w.r;
     for (int k = 0; k < 9; k++) {
       final boolean dg = k % 4 == 0;
       B0[k] = dg ? (ab[0] ? As[k] - mr[0] : S[k] - xr[0]) : S[k];
@@ -571,9 +641,9 @@ public final class GenMatFun {
     }
     if (order < 1) return;
     final double sc1 = (kind == EXP ? e : (kind == LOG ? isig : 1.0)) * nanf;
-    final double[] D2 = new double[9];
+    final double[] D2 = w.D2;
     {
-      final double[] Er = new double[9], Ei = new double[9];
+      final double[] Er = w.E2r, Ei = w.E2i;
       for (int j = 0; j < 3; j++)
         for (int k = 0; k < 3; k++) { Er[3 * j + k] = Dr[pos2(j, k)]; Ei[3 * j + k] = Di[pos2(j, k)]; }
       for (int k = 0; k < 3; k++) {                      // T on index 0
@@ -598,16 +668,15 @@ public final class GenMatFun {
                 * Y[9 + 3 * dd + bb] + r[18 + 3 * aa + cc] * Y[18 + 3 * dd + bb]) * sc1;
     if (order < 2) return;
     final double sc2 = (kind == EXP ? e : (kind == LOG ? isig * isig : 1.0)) * nanf;
-    final double[] D3 = new double[27];
+    final double[] D3 = w.D3;
     {
-      final double[] Er = new double[27], Ei = new double[27];
+      final double[] Er = w.E3r, Ei = w.E3i;
       for (int j = 0; j < 3; j++)
         for (int k = 0; k < 3; k++)
           for (int l = 0; l < 3; l++) {
             Er[9 * j + 3 * k + l] = Dr[pos3(j, k, l)];
             Ei[9 * j + 3 * k + l] = Di[pos3(j, k, l)];
           }
-      final int[] STR = {9, 3, 1};
       for (int ax = 0; ax < 3; ax++) {
         final int s = STR[ax];
         for (int base = 0; base < 27; base++) {

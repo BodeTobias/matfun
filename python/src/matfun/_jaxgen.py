@@ -358,6 +358,40 @@ def evaluate(kind, alpha, A, order):
     r2 = jnp.where(r1 != 0, pi / jnp.where(r1 != 0, r1, 1.0), pcen - _copysign(ps, pcen))
     mu[1] = _cwhere(pc, (jnp.where(preal, r1, pcen), jnp.where(preal, 0.0, ps)), mu[1])
     mu[2] = _cwhere(pc, (jnp.where(preal, r2, pcen), jnp.where(preal, 0.0, -ps)), mu[2])
+
+    # ---- a conjugate pair near the negative real axis (log, powers): f jumps between its two nodes, so the result
+    #      depends on the imaginary part beta itself. The pair from the 2x2 block of the deviator on its invariant
+    #      subspace (orthogonal complement of the left eigenvector u of the real eigenvalue mu[0]):
+    #      beta^2 = -(d^2 + b12 b21), d = (b11 - b22)/2, without the cancellation of the discriminant. The real node
+    #      is ordered first (below)
+    # (decided after the refinement above: a small pair next to a large eigenvalue has an inaccurate centre in x)
+    cut = jnp.zeros((), bool) if kind == "exp" else mu[1][0] + mu[2][0] < 0
+    mu = _newton(As, mu, 0, cut & ~pc)
+    Mc = As - mu[0][0] * I
+    cands = jnp.stack([jnp.cross(Mc[:, 0], Mc[:, 1]), jnp.cross(Mc[:, 0], Mc[:, 2]), jnp.cross(Mc[:, 1], Mc[:, 2])])
+    nrm = jnp.sum(cands * cands, axis=1)
+    u = jnp.where(nrm[1] > nrm[0], cands[1], cands[0])
+    nu = jnp.maximum(nrm[1], nrm[0])
+    u = jnp.where(nrm[2] > nu, cands[2], u)
+    nu = jnp.maximum(nrm[2], nu)
+    okd = cut & (nu > 0)
+    u = u / jnp.sqrt(jnp.where(okd, nu, 1.0))
+    e = I[jnp.argmin(jnp.abs(u))]
+    q1 = e - jnp.sum(e * u) * u
+    q1 = q1 / jnp.sqrt(jnp.where(okd, jnp.sum(q1 * q1), 1.0))
+    q2 = jnp.cross(u, q1)
+    b11, b12, b21, b22 = q1 @ S @ q1, q1 @ S @ q2, q2 @ S @ q1, q2 @ S @ q2
+    dd = 0.5 * (b11 - b22)
+    beta2 = -(dd * dd + b12 * b21)
+    cc = m + 0.5 * (b11 + b22)
+    bt = jnp.sqrt(jnp.abs(beta2))
+    creal = beta2 <= 0
+    mu[1] = _cwhere(okd, (jnp.where(creal, cc + bt, cc), jnp.where(creal, 0.0, bt)), mu[1])
+    mu[2] = _cwhere(okd, (jnp.where(creal, cc - bt, cc), jnp.where(creal, 0.0, -bt)), mu[2])
+    pcen = jnp.where(okd, cc, pcen)
+    ps = jnp.where(okd, bt, ps)
+    preal = jnp.where(okd, creal, preal)
+    pc = pc | okd
     isabs = [pc, pc, pc]
     x = [_cwhere(isabs[i], (mu[i][0] - m, mu[i][1]), x[i]) for i in range(3)]
     orig = [0.0 * m, 1.0 + 0.0 * m, 2.0 + 0.0 * m]
@@ -376,7 +410,9 @@ def evaluate(kind, alpha, A, order):
     for i, j in ((0, 1), (1, 2), (0, 1)):                    # stable sorting network (real triple)
         sw = key(srt[i]["mu"]) > key(srt[j]["mu"])
         srt[i], srt[j] = pick(sw, srt[j], srt[i]), pick(sw, srt[i], srt[j])
-    first = key(nodes[0]["mu"]) <= key(nodes[1]["mu"])        # complex pair: real node first or last
+    # complex pair: real node first or last; first for a pair near the negative real axis (the large divided
+    # differences across the jump of f then only multiply w_2)
+    first = (key(nodes[0]["mu"]) <= key(nodes[1]["mu"])) | cut
     cpl = [pick(first, nodes[k], nodes[(k + 1) % 3]) for k in range(3)]
     cplx = nodes[1]["x"][1] != 0
     nodes = [pick(cplx, cpl[k], srt[k]) for k in range(3)]

@@ -105,11 +105,21 @@ def test_pow_large_alpha(alpha, lam):
 CASES_GENERAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "testdata", "cases_general.txt")
 
 
-def mp_reference_general(kind, alpha, a):
+def mp_eigfun(kind, alpha):
+    """principal f(A) = V f(D) V^-1 from mpmath's eigendecomposition (diagonalizable A; mpmath's logm / sqrtm are
+    inaccurate for a complex pair next to the negative real axis)"""
+    def fm(A):
+        E, V = mp.eig(A)
+        fe = [mp.log(e) if kind == 1 else mp.exp((mp.mpf(0.5) if kind == 3 else mp.mpf(alpha)) * mp.log(e)) for e in E]
+        return V * mp.diag(fe) * mp.inverse(V)
+    return fm
+
+
+def mp_reference_general(kind, alpha, a, fm=None):
     """F (9), J (9, 9), H (9, 9, 9)[:, :, HCOLS] (matrix layout) of the general matrix a (9,) in 60 digits: F from
     mpmath's expm / logm / sqrtm / powm (principal branch, none of gmf's formulas), J and H by central differences
     (truncation O(h^2), round-off 1e-60 / h^2; mpmath's logm does not always converge at 40 digits)"""
-    fm = {0: mp.expm, 1: mp.logm, 3: mp.sqrtm}.get(kind, lambda X: mp.powm(X, mp.mpf(alpha)))
+    fm = fm or {0: mp.expm, 1: mp.logm, 3: mp.sqrtm}.get(kind, lambda X: mp.powm(X, mp.mpf(alpha)))
     A0 = mp.matrix(3, 3)
     for k in range(9):
         A0[k // 3, k % 3] = mp.mpf(float(a[k]))
@@ -151,7 +161,9 @@ def test_general_cases_against_mpmath():
         for row in D[::8]:
             kind, alpha, tol = int(row[0]), row[1], row[2]
             a = row[3:12]
-            ref = mp_reference_general(kind, alpha, a)
+            ev = np.linalg.eigvals(a.reshape(3, 3))
+            near_cut = kind != 0 and np.any((ev.imag != 0) & (ev.real < 0))   # mpmath's logm / sqrtm fail there
+            ref = mp_reference_general(kind, alpha, a, mp_eigfun(kind, alpha) if near_cut else None)
             out = matfun.gmf(NAMES[kind], a.reshape(3, 3), alpha if kind == 2 else None, order=2)
             out = [out[0].ravel(), out[1].reshape(9, 9), out[2].reshape(9, 9, 9)[:, :, list(HCOLS)]]
             errs = [relerr(x, r) for x, r in zip(out, ref)]
@@ -161,3 +173,22 @@ def test_general_cases_against_mpmath():
             worst[key] = [max(x, y) for x, y in zip(worst.get(key, [0, 0, 0]), errs)]
     for k, (eF, eJ, eH) in sorted(worst.items()):
         print(f"gmf {k:12s} F {eF:.1e}  J {eJ:.1e}  H {eH:.1e}")
+
+
+@pytest.mark.parametrize("deg", [179.0, 179.99])
+def test_general_near_180_against_mpmath(deg):
+    """log and x^1.7 of a rotation close to 180 degrees (complex pair next to the branch cut): F, J, H against the
+    60-digit reference (eigendecomposition, see mp_eigfun); the tolerance follows the condition number
+    ~ 1 / (pi - angle)^k (k = 1, 2, 3 for F, J, H)"""
+    th = np.radians(deg)
+    k = np.array([1.0, 2.0, 3.0]) / np.sqrt(14.0)
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    R = np.eye(3) + np.sin(th) * K + (1 - np.cos(th)) * K @ K
+    d = np.pi - th
+    with mp.workdps(60):
+        for kind, alpha, code in (("log", None, 1), ("pow", 1.7, 2)):
+            ref = mp_reference_general(code, alpha or 0.0, R.ravel(), mp_eigfun(code, alpha))
+            out = matfun.gmf(kind, R, alpha, order=2)
+            out = [out[0].ravel(), out[1].reshape(9, 9), out[2].reshape(9, 9, 9)[:, :, list(HCOLS)]]
+            for i, (x, r) in enumerate(zip(out, ref)):
+                assert relerr(x, r) < max(1e-13, 30 * np.finfo(float).eps / d ** (i + 1)), (kind, deg, i, relerr(x, r))

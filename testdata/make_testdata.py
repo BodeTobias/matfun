@@ -17,7 +17,8 @@ Lines starting with # are comments.  The cases check that all implementations ag
 cases_general.txt (gmf_eval, general real matrices, matrix layout, row-major):
     kind alpha tol A[9] F[9] J[81] H[729]                           (831 numbers)
 J[9 m + c] = dF_m/dA_c, H[(9 m + c) 9 + e] = d2F_m/dA_c dA_e (m, c, e = 3 row + column); tol 1e-12, 1e-11 for the
-ill-conditioned cases (graded / wide spectrum, nearly defective).
+ill-conditioned cases (graded / wide spectrum, nearly defective), up to 1e-9 for rotations within 1e-4 degrees of
+180 (log, powers; condition ~ 1 / (pi - angle)^k).
 """
 import ctypes
 import os
@@ -139,6 +140,10 @@ def matrices_general(kind, alpha=0.0):
     if kind != 0 and alpha < 10:
         for e in (100, -100):
             out.append((f"scaled 1e{e:+d}", 10.0 ** e * (1.5 * I + 0.4 * G[12])))
+    # complex pair near the negative real axis (rotations close to 180 degrees; log, powers: across the branch cut)
+    for deg in (179.0, 179.99, 179.9999):
+        out.append((f"near 180: rotation {deg} deg", rot(G[13][0], np.radians(deg))))
+        out.append((f"near 180: rotation {deg} deg, non-normal", sim(9, rot(G[13][1], np.radians(deg)))))
     return out
 
 
@@ -190,6 +195,8 @@ if __name__ == "__main__":
         for i in range(len(As)):
             lbl = mats[i][0]
             tol = 1e-11 if lbl.startswith(("graded", "wide", "Jordan 3 +", "triple real 1e-10")) else 1e-12
+            if lbl.startswith("near 180"):                      # condition ~ 1 / (pi - angle)^k
+                tol = 1e-9 if "179.9999" in lbl else (1e-11 if "179.99" in lbl else 1e-12)
             nums = [kind, alpha, tol] + list(As[i].ravel()) + list(F[i]) + list(J[i]) + list(H[i])
             lines.append(" ".join(f"{x:.17g}" for x in nums))
             n += 1

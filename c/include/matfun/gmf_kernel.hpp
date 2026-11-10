@@ -302,6 +302,69 @@ SMF_UNROLL(8)
     mu[1] = csel(pc, cx<T>{sel(preal, r1, pcen), sel(preal, 0.0, ps)}, mu[1]);
     mu[2] = csel(pc, cx<T>{sel(preal, r2, pcen), sel(preal, 0.0, -ps)}, mu[2]);
   }
+  // ---- a conjugate pair near the negative real axis (log, powers): f jumps between its two nodes, so the result
+  //      depends on the imaginary part beta itself, not only on the characteristic polynomial. The pair from the
+  //      2x2 block of the deviator on its invariant subspace (orthogonal complement of the left eigenvector u of the
+  //      real eigenvalue mu[0]): beta^2 = -(d^2 + b12 b21), d = (b11 - b22)/2, without the cancellation against
+  //      the square of the centre in the discriminant (relative error eps |A| / beta instead of eps |A|^2 / beta^2).
+  //      The real node is ordered first (below)
+  // (decided after the refinement above: a small pair next to a large eigenvalue has an inaccurate centre in x)
+  Msk cut = KIND == EXP ? (zero != zero) : Msk(mu[1].re + mu[2].re < 0);
+  if (anyl(cut)) {
+    newton(As, mu, 0, cut & mnot(pc));
+    const T l0 = mu[0].re;
+    T Mc[9];
+SMF_UNROLL(9)
+    for (int k = 0; k < 9; k++) Mc[k] = k % 4 == 0 ? As[k] - l0 : As[k];
+    // u orthogonal to the columns of A - mu0 I: the largest of their cross products
+    T c01[3] = {Mc[3] * Mc[7] - Mc[6] * Mc[4], Mc[6] * Mc[1] - Mc[0] * Mc[7], Mc[0] * Mc[4] - Mc[3] * Mc[1]};
+    T c02[3] = {Mc[3] * Mc[8] - Mc[6] * Mc[5], Mc[6] * Mc[2] - Mc[0] * Mc[8], Mc[0] * Mc[5] - Mc[3] * Mc[2]};
+    T c12[3] = {Mc[4] * Mc[8] - Mc[7] * Mc[5], Mc[7] * Mc[2] - Mc[1] * Mc[8], Mc[1] * Mc[5] - Mc[4] * Mc[2]};
+    T n01 = c01[0] * c01[0] + c01[1] * c01[1] + c01[2] * c01[2];
+    T n02 = c02[0] * c02[0] + c02[1] * c02[1] + c02[2] * c02[2];
+    T n12 = c12[0] * c12[0] + c12[1] * c12[1] + c12[2] * c12[2];
+    auto s1 = n02 > n01;
+    T u[3], nn = sel(s1, n02, n01);
+SMF_UNROLL(3)
+    for (int k = 0; k < 3; k++) u[k] = sel(s1, c02[k], c01[k]);
+    auto s2 = n12 > nn;
+SMF_UNROLL(3)
+    for (int k = 0; k < 3; k++) u[k] = sel(s2, c12[k], u[k]);
+    nn = sel(s2, n12, nn);
+    Msk okd = cut & (nn > 0);
+    T iu = 1.0 / m_sqrt(sel(okd, nn, 1.0));
+SMF_UNROLL(3)
+    for (int k = 0; k < 3; k++) u[k] = u[k] * iu;
+    // orthonormal basis q1, q2 of the complement of u
+    T au0 = m_abs(u[0]), au1 = m_abs(u[1]), au2 = m_abs(u[2]);
+    auto k1 = au1 < au0;
+    auto k2 = au2 < sel(k1, au1, au0);
+    T ex = sel(k1 | k2, 0.0, 1.0), ey = sel(k1 & mnot(k2), 1.0, 0.0), ez = sel(k2, 1.0, 0.0);
+    T eu = ex * u[0] + ey * u[1] + ez * u[2];
+    T q1[3] = {ex - eu * u[0], ey - eu * u[1], ez - eu * u[2]};
+    T iq = 1.0 / m_sqrt(q1[0] * q1[0] + q1[1] * q1[1] + q1[2] * q1[2]);
+SMF_UNROLL(3)
+    for (int k = 0; k < 3; k++) q1[k] = q1[k] * iq;
+    T q2[3] = {u[1] * q1[2] - u[2] * q1[1], u[2] * q1[0] - u[0] * q1[2], u[0] * q1[1] - u[1] * q1[0]};
+    // B = Q^T S Q (2x2)
+    T Sq1[3], Sq2[3];
+SMF_UNROLL(3)
+    for (int r = 0; r < 3; r++) {
+      Sq1[r] = S[3 * r] * q1[0] + S[3 * r + 1] * q1[1] + S[3 * r + 2] * q1[2];
+      Sq2[r] = S[3 * r] * q2[0] + S[3 * r + 1] * q2[1] + S[3 * r + 2] * q2[2];
+    }
+    T b11 = q1[0] * Sq1[0] + q1[1] * Sq1[1] + q1[2] * Sq1[2], b12 = q1[0] * Sq2[0] + q1[1] * Sq2[1] + q1[2] * Sq2[2];
+    T b21 = q2[0] * Sq1[0] + q2[1] * Sq1[1] + q2[2] * Sq1[2], b22 = q2[0] * Sq2[0] + q2[1] * Sq2[1] + q2[2] * Sq2[2];
+    T dd = 0.5 * (b11 - b22), beta2 = -(dd * dd + b12 * b21), cc = m + 0.5 * (b11 + b22);
+    T bt = m_sqrt(m_abs(beta2));
+    auto creal = beta2 <= 0;
+    mu[1] = csel(okd, cx<T>{sel(creal, cc + bt, cc), sel(creal, 0.0, bt)}, mu[1]);
+    mu[2] = csel(okd, cx<T>{sel(creal, cc - bt, cc), sel(creal, 0.0, -bt)}, mu[2]);
+    pcen = sel(okd, cc, pcen);
+    ps = sel(okd, bt, ps);
+    preal = (okd & creal) | (mnot(okd) & preal);
+    pc = pc | okd;
+  }
   Msk ab[3] = {pc, pc, pc};
   T og[3] = {zero, one, one + 1.0};
 SMF_UNROLL(3)
@@ -327,7 +390,9 @@ SMF_UNROLL(3)
       sa[i] = (sw & sa[j]) | (mnot(sw) & sa[i]); sa[j] = (sw & ta) | (mnot(sw) & sa[j]);
       so[i] = sel(sw, so[j], so[i]); so[j] = sel(sw, to, so[j]);
     }
-    auto first = key(mu[0]) <= key(mu[1]);                    // complex pair: real node first or last
+    // complex pair: real node first or last; first for a pair near the negative real axis (the large divided
+    // differences across the jump of f then only multiply w_2; with the pair first, J and H lose eps / beta^k)
+    auto first = (key(mu[0]) <= key(mu[1])) | cut;
     auto cplx = x[1].im != 0;
     cx<T> nx[3], nm[3];
     Msk na[3];
