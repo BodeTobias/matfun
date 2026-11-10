@@ -172,8 +172,7 @@ namespace SMF_NS {
 // be nullptr; H needs J); kind EXP, LOG or POW (sqrt: POW with al = 0.5); SMF_W at a time, tail padded with I
 template <int KIND>
 void gbatch(int64_t n, const double *A, double *F, double *J, double al, double *H) {
-  double bt[gmf::KMAX];
-  gmf::series_coef(KIND, al, bt);
+  const double *bt = gmf::series_table(KIND, al);
 #if SMF_W == 1
   for (int64_t i = 0; i < n; i++) {
     if (H) gmf::eval<KIND, 2, double>(A + 9 * i, F + 9 * i, J + 81 * i, H + 729 * i, al, bt);

@@ -52,6 +52,24 @@ inline void series_coef(int kind, double al, double *b) {
     b[j] = kind == EXP ? b[j - 1] / j : (kind == LOG ? (j % 2 ? 1.0 : -1.0) / j : b[j - 1] * (al - j + 1) / j);
 }
 
+// the table of series_coef, computed once: exp and log fixed, pow per thread for the last exponent used (host code)
+struct SeriesTable {
+  double b[KMAX];
+};
+inline const double *series_table(int kind, double al) {
+  static const SeriesTable te = [] { SeriesTable t; series_coef(EXP, 0.0, t.b); return t; }();
+  static const SeriesTable tl = [] { SeriesTable t; series_coef(LOG, 0.0, t.b); return t; }();
+  if (kind == EXP) return te.b;
+  if (kind == LOG) return tl.b;
+  thread_local SeriesTable tp;
+  thread_local double tp_al = -1.0;              // (al > 0 for pow)
+  if (!(al == tp_al)) {
+    series_coef(POW, al, tp.b);
+    tp_al = al;
+  }
+  return tp.b;
+}
+
 // terms K of the group series: sum_k b_(n+k) h_k with |h_k| <= C(k+n, n) r^k (r: radius / centre), and the series of
 // the pole (multiplicity <= 3: C(k+2, 2) q^k, q: radius / pole distance), until a bound < 1e-17 x the largest
 SMF_HD inline int nterms(const double *b, int n, double r, double q) {
