@@ -43,7 +43,7 @@ gcc myapp.c -I ~/.local/include -L ~/.local/lib -lmatfun -Wl,-rpath,$HOME/.local
 <dependency>
   <groupId>io.github.bodetobias</groupId>
   <artifactId>matfun</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 

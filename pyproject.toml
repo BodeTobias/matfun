@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "matfun"
-version = "0.1.0"
+version = "0.1.1"
 description = "exp, log, sqrt, A^alpha of symmetric and general 3x3 matrices with first and second derivatives (C, CUDA, JAX)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,8 +36,8 @@ Issues = "https://github.com/BodeTobias/matfun/issues"
 
 [project.optional-dependencies]
 jax = ["jax>=0.6"]
-cuda13 = ["jax[cuda13]>=0.6", "matfun-cuda13==0.1.0"]
-cuda12 = ["jax[cuda12]>=0.6", "matfun-cuda12==0.1.0"]
+cuda13 = ["jax[cuda13]>=0.6", "matfun-cuda13==0.1.1"]
+cuda12 = ["jax[cuda12]>=0.6", "matfun-cuda12==0.1.1"]
 # (jaxlib has no wheels for macOS x86-64 since 0.4.38: there the JAX tests are skipped)
 test = ["pytest", "jax>=0.6; sys_platform != 'darwin' or platform_machine != 'x86_64'", "mpmath"]
 

@@ -11,10 +11,10 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "matfun-cuda12"
-version = "0.1.0"
+version = "0.1.1"
 description = "CUDA 12 kernels for matfun (matrix functions of symmetric and general 3x3 matrices with derivatives)"
 requires-python = ">=3.10"
-dependencies = ["matfun==0.1.0", "nvidia-cuda-runtime-cu12>=12,<13"]
+dependencies = ["matfun==0.1.1", "nvidia-cuda-runtime-cu12>=12,<13"]
 license = "MIT AND Apache-2.0"                   # Apache-2.0: the XLA FFI headers compiled into libmatfun_cuda
 license-files = ["LICENSE", "LICENSE-xla_ffi"]
 authors = [{ name = "Tobias Bode" }]

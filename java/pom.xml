@@ -6,7 +6,7 @@
 
   <groupId>io.github.bodetobias</groupId>
   <artifactId>matfun</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
   <packaging>jar</packaging>
   <name>matfun</name>
   <description>exp, log, sqrt, A^alpha of symmetric and general 3x3 matrices with first and second derivatives (Java

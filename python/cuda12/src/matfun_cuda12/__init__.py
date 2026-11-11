@@ -9,7 +9,7 @@ jax[cuda12] installs (site-packages/nvidia/cuda_runtime/lib), otherwise via the 
 import glob
 import os
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 

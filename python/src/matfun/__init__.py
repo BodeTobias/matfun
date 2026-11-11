@@ -12,7 +12,7 @@ kind: "exp", "log", "sqrt" or "pow" (with alpha > 0).
 """
 from ._capi import gmf, smf
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["smf", "gmf", "backends"]
 
 

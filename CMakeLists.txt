@@ -4,7 +4,7 @@
 #   cmake -B build -DMATFUN_BUILD_TESTS=ON && cmake --build build -j && ctest --test-dir build
 #   cmake -B build -DMATFUN_BUILD_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 ...
 cmake_minimum_required(VERSION 3.24)
-project(matfun VERSION 0.1.0 LANGUAGES C CXX)
+project(matfun VERSION 0.1.1 LANGUAGES C CXX)
 
 option(MATFUN_BUILD_C "C/C++ library libmatfun" ON)
 option(MATFUN_BUILD_CUDA "CUDA library libmatfun_cuda" OFF)
