@@ -1,9 +1,10 @@
 """
 matfun._jaxgen -- gmf in pure JAX: F, J and H of one general (non-symmetric) real 3x3 matrix A (fallback of
 matfun.jax.gmf where no compiled kernel runs, e.g. float32 or other backends).  Never differentiated: the derivative
-rules of matfun.jax supply J and H themselves.  Real arithmetic only (complex numbers as (re, im) pairs), no bit
-casts and no data-dependent control flow, so that code generators translating the jaxpr (e.g. the C element kernels
-of autopdex) cover it.  Same method as c/include/matfun/gmf_kernel.hpp (theory.md, "General matrices"):
+rules of matfun.jax supply J and H themselves.  Real arithmetic only (complex numbers as (re, im) pairs) and no bit
+casts, so that code generators translating the jaxpr (cjit) cover it; its loops are while loops over the series
+terms, as many as the C kernel's bound gives.  Same method as c/include/matfun/gmf_kernel.hpp (theory.md, "General
+matrices"):
 
   * eigenvalues mu = m + x of A (scaled by a power of two sig), x of S = A - m I in closed form (trigonometric /
     Cardano on the traceless, normalized deviator); eigenvalues far from m refined (Newton on det(A - mu I) with
@@ -13,7 +14,8 @@ of autopdex) cover it.  Same method as c/include/matfun/gmf_kernel.hpp (theory.m
     w_0 = I, w_1 = S - x_1 I, w_2 = (S - x_1 I)(S - x_2 I), N_j = {x_1..x_j+1}; a complex pair through a real basis
   * the 19 confluent divided differences f[x1^a x2^b x3^c] by residues: a group of close nodes (all three, or the
     closest pair) by the Taylor series around its real centre (streamed over the series index, divided by the
-    poles of the other node), single nodes by their Taylor coefficients
+    poles of the other node; the number of terms per matrix from the C kernel's bound, nterms), single nodes by
+    their Taylor coefficients
 """
 import math
 
@@ -25,7 +27,7 @@ import jax.numpy as jnp
 from ._jaxpure import _pow2, _pow_k
 
 _RHO, _R_EXP, _RHO_POLE = 0.7, 4.0, 0.6     # group radius / distance to the singularity (exp: radius), pole ratio
-_K = 128                                     # series terms (radius ratio 0.7: 0.7^k C(k+8, 8) < 1e-17 x max for k ~ 112)
+_K = 128                                     # series terms at most (radius ratio 0.7: 0.7^k C(k+8, 8) < 1e-17 x max for k ~ 112)
 _TWO_PI_3 = 2.0 * math.pi / 3.0
 
 # the 19 divided differences f[x1^a x2^b x3^c] of the Newton form (a >= b >= c; a = order + 1), each one node more
@@ -267,8 +269,38 @@ def _divided_differences(kind, alpha, nd, sig, m, x, mu, isabs, inG, grp, xshift
             accn.append(_cadd(acc[c], _cscale(Ecur[c], g)))
         return (Ecur, tuple(q[1:]), accn), None
 
+    # terms K of the group series as the C kernel's nterms: sum_k b_(n+k) h_k with |h_k| <= C(k+n, n) r^k (r: radius /
+    # centre), and the series of the pole (C(k+2, 2) q^k, q: radius / pole distance), until a bound < 1e-17 x the
+    # largest (this sample's own K: no group, a few terms)
+    rr = jnp.maximum(jnp.maximum(_cabs(u[0]), _cabs(u[1])), _cabs(u[2]))
+    rq = jnp.where((pk[0] | pk[1] | pk[2]) & (rr * jnp.abs(1.0 / ap) <= 1.0), rr * jnp.abs(1.0 / ap), 0.0)
+    rr = jnp.where(hasg & (rr <= _R_EXP + 0.5), rr, 0.0)
+    n = 3 * (_NDD.index(nd) + 1) - 1
+    babs = jnp.asarray(np.abs(np.concatenate([_series_coefs(kind, alpha, _K), np.zeros(n + 1)])), dtype=m.dtype)
+
+    def r_step(v):  # (C: t, best, M = k, the break test, then c and r^k)
+        k, best, c, rk, M, done = v
+        t = babs[n + k] * c * rk
+        best = jnp.maximum(best, t)
+        done = ((k > 2) & (t <= 1e-17 * best)) | ~(rk > 0)
+        return k + 1, best, c * (k + n + 1) / (k + 1), rk * rr, k, done
+    one, f0 = 1.0 + 0.0 * m, jnp.zeros((), bool)
+    _, _, _, _, M, _ = jax.lax.while_loop(lambda v: ~v[5] & (n + v[0] < _K) & (rr > 0), r_step, (0, 0.0 * m, one, one, 1, f0))
+
+    def q_step(v):  # (C: break before M = max(M, k))
+        k, qk, M, done = v
+        done = (k > M) & ((k + 1.0) * (k + 2.0) / 2.0 * qk <= 1e-17)
+        return k + 1, qk * rq, jnp.where(done, M, jnp.maximum(M, k)), done
+    _, _, M, _ = jax.lax.while_loop(lambda v: ~v[3] & (n + v[0] < _K) & (rq > 0), q_step, (0, one, M, f0))
+    K = jnp.minimum(n + M + 1, _K)
+
     acc0 = [zero] * nd
-    (_, _, acc), _ = jax.lax.scan(step, (E0, q0, acc0), (btab, first))
+
+    def w_step(v):
+        j, carry = v
+        carry, _ = step(carry, (btab[j], j == 0))
+        return j + 1, carry
+    _, (_, _, acc) = jax.lax.while_loop(lambda v: v[0] < K, w_step, (0, (E0, q0, acc0)))
     out = []
     for c, (ms, par, i) in enumerate(_TREE[:nd]):
         n = sum(ms) - 1

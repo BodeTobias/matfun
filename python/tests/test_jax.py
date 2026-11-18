@@ -266,8 +266,25 @@ def test_jax_gmf_float32_with_x64(dev):
         assert all(jrel(x, y) < 1e-4 for x, y in zip(out, ref))
 
 
-def test_jaxgen_has_no_bit_casts_or_while_loops():
-    """the pure-JAX gmf (F, J, H) uses no bit-level operations and no while loops (code generators that translate the
-    jaxpr, e.g. the C element kernels of autopdex, cannot nest while loops inside a local Newton loop)"""
+def test_jaxgen_has_no_bit_casts():
+    """the pure-JAX gmf (F, J, H) uses no bit-level operations (code generators that translate the jaxpr, cjit, take
+    it; its while loops over the series terms too, also nested in a local Newton loop)"""
     txt = str(jax.make_jaxpr(mf._gimpl(2, "log", 0.0))(jnp.ones((2, 3, 3)))).lower()
-    assert not [w for w in ("bitcast", "frexp", "ldexp", "shift_", "ffi_call", "callback", "while") if w in txt]
+    assert not [w for w in ("bitcast", "frexp", "ldexp", "shift_", "ffi_call", "callback") if w in txt]
+
+
+@pytest.mark.parametrize("kind, alpha", GKINDS)
+def test_jaxgen_series_terms_as_the_c_kernel(kind, alpha):
+    """the pure-JAX gmf sums as many series terms as the C kernel's bound gives (per matrix, at most 128): F, J and H
+    as the C library's, also for clustered nodes, a pair next to the negative real axis and wide spectra"""
+    from matfun import _jaxgen
+    A = gen_matrices(200, 7)
+    A[3] = np.diag([1.0, 1.0 + 1e-9, 1.0 - 1e-9])                              # clustered
+    A[4] = np.array([[-0.9, -0.43, 0.0], [0.43, -0.9, 0.0], [0.0, 0.0, 0.5]])  # pair near the negative real axis
+    A[5:50] = 2.0 * np.random.default_rng(8).standard_normal((45, 3, 3))       # wide spectra
+    jk, ja = ("pow", 0.5) if kind == "sqrt" else (kind, 0.0 if alpha is None else alpha)
+    out = jax.jit(jax.vmap(lambda X: _jaxgen.evaluate(jk, ja, X, 2)))(jnp.asarray(A))
+    for x, z in zip(out, matfun.gmf(kind, A, alpha, order=2)):
+        x, ok = np.asarray(x), np.isfinite(z)
+        assert np.array_equal(np.isnan(x), np.isnan(z))
+        assert float(np.max(np.abs(x - z)[ok]) / np.max(np.abs(z[ok]))) < 1e-13
