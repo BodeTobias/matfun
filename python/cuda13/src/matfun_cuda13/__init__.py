@@ -9,7 +9,7 @@ jax[cuda13] installs (site-packages/nvidia/cu13/lib), otherwise via the system l
 import glob
 import os
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
