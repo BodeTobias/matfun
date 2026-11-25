@@ -3,6 +3,8 @@
 // (F, J, H); attributes kind (int64), alpha (f64).  Targets, registered by matfun/jax.py:
 //   SmfValue, SmfValueJac, SmfValueJacHess: Voigt layout as smf_eval, x (..., 6), F (..., 6), J (..., 6, 6),
 //   H (..., 6, 6, 6)
+//   SmfMatrixValue, SmfMatrixValueJac, SmfMatrixValueJacHess: symmetric matrices as smf_eval_matrix, x (..., 3, 3),
+//   F (..., 3, 3), J (..., 3, 3, 3, 3), H (..., 3, 3, 3, 3, 3, 3); NaN for a matrix that is not symmetric
 //   GmfValue, GmfValueJac, GmfValueJacHess: general matrices as gmf_eval, x (..., 3, 3), F (..., 3, 3),
 //   J (..., 3, 3, 3, 3), H (..., 3, 3, 3, 3, 3, 3)
 #include <algorithm>
@@ -72,6 +74,9 @@ static ffi::Error Eval(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::Remai
 MATFUN_HANDLER(SmfValue, VOIGT);
 MATFUN_HANDLER(SmfValueJac, VOIGT);
 MATFUN_HANDLER(SmfValueJacHess, VOIGT);
+MATFUN_HANDLER(SmfMatrixValue, MATRIX);
+MATFUN_HANDLER(SmfMatrixValueJac, MATRIX);
+MATFUN_HANDLER(SmfMatrixValueJacHess, MATRIX);
 MATFUN_HANDLER(GmfValue, GENERAL);
 MATFUN_HANDLER(GmfValueJac, GENERAL);
 MATFUN_HANDLER(GmfValueJacHess, GENERAL);
