@@ -14,5 +14,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def library_path():
-    found = sorted(glob.glob(os.path.join(_HERE, "libmatfun_cuda.*")))
-    return found[0] if found else os.path.join(_HERE, "libmatfun_cuda.so")
+    for d in __path__:                  # (all directories of the package: an editable install keeps the library apart)
+        found = sorted(glob.glob(os.path.join(d, "libmatfun_cuda.*")))
+        if found:
+            return found[0]
+    return os.path.join(_HERE, "libmatfun_cuda.so")

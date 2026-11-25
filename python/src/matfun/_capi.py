@@ -6,6 +6,7 @@ import ctypes
 import glob
 import math
 import os
+import sys
 
 import numpy as np
 
@@ -15,11 +16,15 @@ _lib = None
 
 
 def library_path():
-    """path of libmatfun (MATFUN_LIB overrides the copy installed with the package)"""
+    """path of libmatfun (MATFUN_LIB overrides the copy installed with the package; searched in all directories of
+    the package, an editable install keeps it apart from the sources)"""
     if os.environ.get("MATFUN_LIB"):
         return os.environ["MATFUN_LIB"]
-    found = sorted(glob.glob(os.path.join(_HERE, "libmatfun.*")) + glob.glob(os.path.join(_HERE, "matfun.dll")))
-    return found[0] if found else os.path.join(_HERE, "libmatfun.so")
+    for d in sys.modules[__package__].__path__:
+        found = sorted(glob.glob(os.path.join(d, "libmatfun.*")) + glob.glob(os.path.join(d, "matfun.dll")))
+        if found:
+            return found[0]
+    return os.path.join(_HERE, "libmatfun.so")
 
 
 def _load():
