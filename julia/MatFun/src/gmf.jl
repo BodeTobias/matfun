@@ -689,7 +689,8 @@ end
     gmf!(F, J, H, kind, A; alpha=0.0) -> F
 
 In-place version of [`gmf`](@ref): `F`, `J` (or `nothing`) and `H` (or `nothing`; needs `J`) of the sizes listed
-there are overwritten; multithreaded over chunks of matrices like [`smf!`](@ref).
+there are overwritten. For one matrix (Float64, `Array` outputs) it does not allocate; `n` matrices run multithreaded
+over chunks like [`smf!`](@ref).
 """
 function gmf!(F::AbstractArray, J::Union{Nothing,AbstractArray}, H::Union{Nothing,AbstractArray}, kind,
               A::AbstractArray; alpha::Real = 0.0)

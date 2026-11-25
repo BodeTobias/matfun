@@ -557,7 +557,7 @@ end
 In-place version of [`smf`](@ref): `F`, `J` (or `nothing`) and `H` (or `nothing`; needs `J`) of the sizes listed
 there are overwritten. For one matrix (Float64, `Array` outputs) it does not allocate. For `n` matrices the series
 coefficients are computed once per call, and the work runs multithreaded (`Threads.@threads :dynamic`) over chunks
-of 1024 matrices (256 with H), as the C library does with OpenMP; start Julia with `-t N` to use N threads.
+of 1024 matrices (256 with H); start Julia with `-t N` to use N threads.
 Throws `ArgumentError` for an unknown kind, alpha <= 0 with pow, H without J or a non-symmetric matrix, and
 `DimensionMismatch` for wrong sizes.
 """
