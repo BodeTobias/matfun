@@ -1,9 +1,11 @@
 // matfun_cuda.cu -- CUDA kernels around smf_kernel.hpp and gmf_kernel.hpp (T = double, one thread per matrix), C API
-// smf_cuda_eval / smf_cuda_eval_matrix / gmf_cuda_eval and, with MATFUN_WITH_XLA_FFI, the XLA FFI handlers
-// SmfValueCuda / SmfValueJacCuda / SmfValueJacHessCuda for JAX (Voigt layout) and GmfValueCuda / GmfValueJacCuda /
+// smf_cuda_eval / smf_cuda_eval_matrix / gmf_cuda_eval and, with MATFUN_WITH_XLA_FFI, the XLA FFI handlers for JAX:
+// SmfValueCuda / SmfValueJacCuda / SmfValueJacHessCuda (Voigt layout), SmfMatrixValueCuda / SmfMatrixValueJacCuda /
+// SmfMatrixValueJacHessCuda (symmetric matrices, matrix layout) and GmfValueCuda / GmfValueJacCuda /
 // GmfValueJacHessCuda (general matrices, matrix layout).
 #include <cuda_runtime_api.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -211,117 +213,52 @@ namespace ffi = xla::ffi;
 
 namespace {
 
-ffi::Error Ffi(cudaStream_t stream, ffi::Buffer<ffi::F64> x, double *F, double *J, double *H, int64_t kind,
-               double alpha) {
-  auto dims = x.dimensions();
-  if (dims.size() == 0 || dims[dims.size() - 1] != 6)
-    return ffi::Error::InvalidArgument("matfun: expected Voigt vectors of shape (..., 6)");
+enum Family { VOIGT, MATRIX, GENERAL };
+
+// x -> F, (F, J) or (F, J, H) of a family (as smf_cuda_eval, smf_cuda_eval_matrix, gmf_cuda_eval) on XLA's stream
+template <Family FAM>
+ffi::Error Eval(cudaStream_t stream, ffi::Buffer<ffi::F64> x, ffi::RemainingRets out, int64_t kind, double alpha) {
+  const auto dims = x.dimensions();
+  const size_t r = dims.size();
+  if (FAM == VOIGT ? r < 1 || dims[r - 1] != 6 : r < 2 || dims[r - 1] != 3 || dims[r - 2] != 3)
+    return ffi::Error::InvalidArgument(FAM == VOIGT ? "matfun: expected Voigt vectors of shape (..., 6)"
+                                                    : "matfun: expected matrices of shape (..., 3, 3)");
+  if (out.size() < 1 || out.size() > 3) return ffi::Error::InvalidArgument("matfun: expected F, (F, J) or (F, J, H)");
+  double *p[3] = {};
+  for (size_t i = 0; i < out.size(); i++) {
+    auto b = out.get<ffi::Buffer<ffi::F64>>(i);
+    if (b.has_error()) return b.error();
+    p[i] = b.value()->typed_data();
+  }
+  const int k = (int)std::clamp<int64_t>(kind, -1, SMF_SQRT + 1);     // (outside the int range: invalid)
+  const int64_t n = (int64_t)x.element_count() / (FAM == VOIGT ? 6 : 9);
   cudaError_t err = cudaSuccess;
-  const int r = launch(stream, (int)kind, alpha, x.element_count() / 6, x.typed_data(), false, F, J, H, &err);
-  if (r == -1) return ffi::Error::InvalidArgument("matfun: invalid kind or alpha");
-  if (r != 0) return ffi::Error::Internal(std::string("matfun: CUDA launch failed: ") + cudaGetErrorString(err));
+  const int res = FAM == GENERAL ? glaunch(stream, k, alpha, n, x.typed_data(), p[0], p[1], p[2], &err)
+                                 : launch(stream, k, alpha, n, x.typed_data(), FAM == MATRIX, p[0], p[1], p[2], &err);
+  if (res == -1) return ffi::Error::InvalidArgument("matfun: invalid kind or alpha");
+  if (res != 0) return ffi::Error::Internal(std::string("matfun: CUDA launch failed: ") + cudaGetErrorString(err));
   return ffi::Error::Success();
-}
-
-ffi::Error ValueImpl(cudaStream_t st, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F, int64_t kind,
-                     double alpha) {
-  return Ffi(st, x, F->typed_data(), nullptr, nullptr, kind, alpha);
-}
-
-ffi::Error ValueJacImpl(cudaStream_t st, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                        ffi::ResultBuffer<ffi::F64> J, int64_t kind, double alpha) {
-  return Ffi(st, x, F->typed_data(), J->typed_data(), nullptr, kind, alpha);
-}
-
-ffi::Error ValueJacHessImpl(cudaStream_t st, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                            ffi::ResultBuffer<ffi::F64> J, ffi::ResultBuffer<ffi::F64> H, int64_t kind,
-                            double alpha) {
-  return Ffi(st, x, F->typed_data(), J->typed_data(), H->typed_data(), kind, alpha);
-}
-
-ffi::Error GFfi(cudaStream_t stream, ffi::Buffer<ffi::F64> x, double *F, double *J, double *H, int64_t kind,
-                double alpha) {
-  auto dims = x.dimensions();
-  if (dims.size() < 2 || dims[dims.size() - 1] != 3 || dims[dims.size() - 2] != 3)
-    return ffi::Error::InvalidArgument("matfun: expected matrices of shape (..., 3, 3)");
-  cudaError_t err = cudaSuccess;
-  const int r = glaunch(stream, (int)kind, alpha, x.element_count() / 9, x.typed_data(), F, J, H, &err);
-  if (r == -1) return ffi::Error::InvalidArgument("matfun: invalid kind or alpha");
-  if (r != 0) return ffi::Error::Internal(std::string("matfun: CUDA launch failed: ") + cudaGetErrorString(err));
-  return ffi::Error::Success();
-}
-
-ffi::Error GValueImpl(cudaStream_t st, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F, int64_t kind,
-                      double alpha) {
-  return GFfi(st, x, F->typed_data(), nullptr, nullptr, kind, alpha);
-}
-
-ffi::Error GValueJacImpl(cudaStream_t st, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                         ffi::ResultBuffer<ffi::F64> J, int64_t kind, double alpha) {
-  return GFfi(st, x, F->typed_data(), J->typed_data(), nullptr, kind, alpha);
-}
-
-ffi::Error GValueJacHessImpl(cudaStream_t st, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                             ffi::ResultBuffer<ffi::F64> J, ffi::ResultBuffer<ffi::F64> H, int64_t kind,
-                             double alpha) {
-  return GFfi(st, x, F->typed_data(), J->typed_data(), H->typed_data(), kind, alpha);
 }
 
 }  // namespace
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GmfValueCuda, GValueImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
+#define MATFUN_HANDLER(name, fam)                                          \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(name, Eval<fam>, ffi::Ffi::Bind()           \
+                                                     .Ctx<ffi::PlatformStream<cudaStream_t>>() \
+                                                     .Arg<ffi::Buffer<ffi::F64>>()             \
+                                                     .RemainingRets()                          \
+                                                     .Attr<int64_t>("kind")                    \
+                                                     .Attr<double>("alpha"))
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GmfValueJacCuda, GValueJacImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GmfValueJacHessCuda, GValueJacHessImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(SmfValueCuda, ValueImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(SmfValueJacCuda, ValueJacImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(SmfValueJacHessCuda, ValueJacHessImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
+MATFUN_HANDLER(SmfValueCuda, VOIGT);
+MATFUN_HANDLER(SmfValueJacCuda, VOIGT);
+MATFUN_HANDLER(SmfValueJacHessCuda, VOIGT);
+MATFUN_HANDLER(SmfMatrixValueCuda, MATRIX);
+MATFUN_HANDLER(SmfMatrixValueJacCuda, MATRIX);
+MATFUN_HANDLER(SmfMatrixValueJacHessCuda, MATRIX);
+MATFUN_HANDLER(GmfValueCuda, GENERAL);
+MATFUN_HANDLER(GmfValueJacCuda, GENERAL);
+MATFUN_HANDLER(GmfValueJacHessCuda, GENERAL);
 
 // XLA FFI API version the handlers were built against (major * 1000 + minor); matfun.jax only registers them with
 // a jaxlib of the same major and at least this minor version

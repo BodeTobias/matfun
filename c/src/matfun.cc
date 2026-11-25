@@ -1,4 +1,5 @@
-// matfun.cc -- C API (matfun.h); the kernel variant (instruction set) is chosen at run time, dispatch.h.
+// matfun.cc -- C API (matfun.h) and the driver of dispatch.h; the kernel variant (instruction set) is chosen at run
+// time.
 #include "matfun/matfun.h"
 
 #include <algorithm>
@@ -6,77 +7,93 @@
 #include "dispatch.h"
 #include "matfun/smf_kernel.hpp"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifndef SMF_VERSION
 #define SMF_VERSION "0.0.0"
 #endif
 
-namespace {
+namespace smf_dispatch {
 
 constexpr int64_t CHUNK_H = 256, CHUNK = 1024;   // matrices per task with / without H
-constexpr int64_t SMALL = 64;                     // matrices per batch call of a single-chunk call
+constexpr int64_t SMALL = 64;                     // matrices per batch call of full symmetric input
 
-// n matrices, chunked and parallel (OpenMP); input either Voigt vectors (n x 6) or full matrices (mat, n x 9)
-int eval_chunks(int kind, double alpha, int64_t n, const double *x, bool mat, double *F, double *J, double *H) {
-  if (kind < SMF_EXP || kind > SMF_SQRT || n < 0 || (H && !J) || (kind == SMF_POW && !(alpha > 0))) return -1;
-  if (kind != SMF_POW) alpha = kind == SMF_SQRT ? 0.5 : 0.0;
-  const smf_dispatch::batch_fn batch = smf_dispatch::impl().fn;
-  const int64_t nf = mat ? 9 : 6, nj = mat ? 81 : 36, nh = mat ? 729 : 216;   // output sizes per matrix
-  const int64_t chunk = H ? CHUNK_H : CHUNK;
-  const int64_t nchunks = (n + chunk - 1) / chunk;
-  // one chunk of matrices lo..hi; full input: their Voigt vectors in buf (6 x chunk); false if one is not symmetric
-  auto run = [&](int64_t lo, int64_t hi, double *buf) {
-    const double *v = x + 6 * lo;
-    bool sym = true;
-    if (mat) {
-      for (int64_t i = lo; i < hi; i++) sym &= smf::from_matrix(x + 9 * i, buf + 6 * (i - lo));
-      v = buf;
-    }
-    batch(kind, hi - lo, v, F + nf * lo, J ? J + nj * lo : nullptr, alpha, H ? H + nh * lo : nullptr, mat);
-    return sym;
-  };
-  if (nchunks <= 1) {                            // small calls (e.g. one matrix): no OpenMP region, small buffer
-    double buf[6 * SMALL];
-    bool sym = true;
-    for (int64_t lo = 0; lo < n; lo += SMALL) sym &= run(lo, std::min(n, lo + SMALL), buf);
-    return sym ? 0 : -3;
+bool prepare(Call &c) {
+  if (c.kind < SMF_EXP || c.kind > SMF_SQRT || c.n < 0 || (c.H && !c.J) || (c.kind == SMF_POW && !(c.alpha > 0)))
+    return false;
+  if (c.fam == GENERAL && c.kind == SMF_SQRT) c.kind = SMF_POW, c.alpha = 0.5;
+  if (c.kind != SMF_POW) c.alpha = c.kind == SMF_SQRT ? 0.5 : 0.0;
+  const Impl &d = impl();
+  c.fn = c.n == 1 ? d.fn1 : d.fn;
+  c.gfn = c.n == 1 ? d.gfn1 : d.gfn;
+  return true;
+}
+
+bool run(const Call &c, int64_t lo, int64_t hi) {
+  const int64_t nf = c.fam == VOIGT ? 6 : 9, nj = nf * nf, nh = nj * nf;   // output sizes per matrix
+  double *F = c.F + nf * lo, *J = c.J ? c.J + nj * lo : nullptr, *H = c.H ? c.H + nh * lo : nullptr;
+  if (c.fam == GENERAL) {
+    c.gfn(c.kind, hi - lo, c.x + 9 * lo, F, J, c.alpha, H);
+    return true;
   }
+  if (c.fam == VOIGT) {
+    c.fn(c.kind, hi - lo, c.x + 6 * lo, F, J, c.alpha, H, 0);
+    return true;
+  }
+  double buf[6 * SMALL];                         // Voigt vectors of the symmetric parts
+  bool sym = true;
+  for (int64_t b = 0; b < hi - lo; b += SMALL) {
+    const int64_t m = std::min(hi - lo - b, SMALL);
+    for (int64_t i = 0; i < m; i++) sym &= smf::from_matrix(c.x + 9 * (lo + b + i), buf + 6 * i);
+    c.fn(c.kind, m, buf, F + 9 * b, J ? J + 81 * b : nullptr, c.alpha, H ? H + 729 * b : nullptr, 1);
+  }
+  return sym;
+}
+
+// one task up to CHUNK matrices (CHUNK_H with H); a larger call about evenly over the threads, with at most CHUNK
+// and at least CHUNK / 4 matrices per task (general matrices, a few times the work each: CHUNK / 16), whole SIMD
+// vectors
+int64_t chunk(const Call &c, int threads) {
+  const int64_t mx = c.H ? CHUNK_H : CHUNK, mn = mx / (c.fam == GENERAL ? 16 : 4);
+  if (c.n <= mx) return mx;
+  return (std::clamp((c.n + threads - 1) / std::max(threads, 1), mn, mx) + 7) / 8 * 8;
+}
+
+}  // namespace smf_dispatch
+
+namespace {
+
+// a call of the C API: chunks in parallel (OpenMP); 0, -1 (invalid arguments) or -3 (a matrix not symmetric)
+int eval(smf_dispatch::Call c) {
+  if (!smf_dispatch::prepare(c)) return -1;
+#ifdef _OPENMP
+  const int threads = omp_get_max_threads();
+#else
+  const int threads = 1;
+#endif
+  const int64_t ch = smf_dispatch::chunk(c, threads), nchunks = (c.n + ch - 1) / ch;
+  if (nchunks <= 1)                              // small calls (e.g. one matrix): no OpenMP region
+    return smf_dispatch::run(c, 0, c.n) ? 0 : -3;
   int asym = 0;
 #pragma omp parallel for schedule(dynamic) reduction(| : asym)
-  for (int64_t c = 0; c < nchunks; c++) {
-    double buf[6 * CHUNK];                       // Voigt vectors of the matrices (full input only)
-    asym |= !run(c * chunk, std::min(n, (c + 1) * chunk), buf);
-  }
+  for (int64_t k = 0; k < nchunks; k++) asym |= !smf_dispatch::run(c, k * ch, std::min(c.n, (k + 1) * ch));
   return asym ? -3 : 0;
 }
 
 }  // namespace
 
 extern "C" int smf_eval(int kind, double alpha, int64_t n, const double *v, double *F, double *J, double *H) {
-  return eval_chunks(kind, alpha, n, v, false, F, J, H);
+  return eval({smf_dispatch::VOIGT, kind, alpha, n, v, F, J, H});
 }
 
 extern "C" int smf_eval_matrix(int kind, double alpha, int64_t n, const double *A, double *F, double *J, double *H) {
-  return eval_chunks(kind, alpha, n, A, true, F, J, H);
+  return eval({smf_dispatch::MATRIX, kind, alpha, n, A, F, J, H});
 }
 
-// general matrices: chunked and parallel as eval_chunks
 extern "C" int gmf_eval(int kind, double alpha, int64_t n, const double *A, double *F, double *J, double *H) {
-  if (kind < SMF_EXP || kind > SMF_SQRT || n < 0 || (H && !J) || (kind == SMF_POW && !(alpha > 0))) return -1;
-  if (kind == SMF_SQRT) kind = SMF_POW, alpha = 0.5;
-  if (kind != SMF_POW) alpha = 0.0;
-  const smf_dispatch::gbatch_fn gbatch = smf_dispatch::impl().gfn;
-  const int64_t chunk = H ? CHUNK_H : CHUNK;
-  const int64_t nchunks = (n + chunk - 1) / chunk;
-  if (nchunks <= 1) {                            // small calls: no OpenMP region
-    gbatch(kind, n, A, F, J, alpha, H);
-    return 0;
-  }
-#pragma omp parallel for schedule(dynamic)
-  for (int64_t c = 0; c < nchunks; c++) {
-    const int64_t lo = c * chunk, hi = std::min(n, lo + chunk);
-    gbatch(kind, hi - lo, A + 9 * lo, F + 9 * lo, J ? J + 81 * lo : nullptr, alpha, H ? H + 729 * lo : nullptr);
-  }
-  return 0;
+  return eval({smf_dispatch::GENERAL, kind, alpha, n, A, F, J, H});
 }
 
 extern "C" const char *smf_simd_name(void) { return smf_dispatch::impl().name; }

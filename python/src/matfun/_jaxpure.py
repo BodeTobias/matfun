@@ -1,7 +1,7 @@
 """
 matfun._jaxpure -- the kernel in pure JAX: F, J and H of one Voigt vector by the Daleckii-Krein formulas (fallback of
-matfun.jax where no compiled kernel runs, e.g. float32 or other backends).  Never differentiated: the derivative
-rules of matfun.jax supply J and H themselves.
+matfun.jax where no compiled kernel runs, e.g. other backends, and what tools that inline primitives compile, e.g.
+kernelax).  Never differentiated: the derivative rules of matfun.jax supply J and H themselves.
 
 Method (as the C kernel, c/include/matfun/smf_kernel.hpp):
   * eigen-decomposition A = V diag(lam) V^T in closed form, orthonormal V by construction: A scaled by a power of

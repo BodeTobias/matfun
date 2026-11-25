@@ -1,10 +1,10 @@
 """
 matfun._jaxgen -- gmf in pure JAX: F, J and H of one general (non-symmetric) real 3x3 matrix A (fallback of
-matfun.jax.gmf where no compiled kernel runs, e.g. float32 or other backends).  Never differentiated: the derivative
-rules of matfun.jax supply J and H themselves.  Real arithmetic only (complex numbers as (re, im) pairs) and no bit
-casts, so that code generators translating the jaxpr (cjit) cover it; its loops are while loops over the series
-terms, as many as the C kernel's bound gives.  Same method as c/include/matfun/gmf_kernel.hpp (theory.md, "General
-matrices"):
+matfun.jax.gmf where no compiled kernel runs, e.g. other backends, and what tools that inline primitives compile,
+e.g. kernelax).  Never differentiated: the derivative rules of matfun.jax supply J and H themselves.  Real arithmetic
+only (complex numbers as (re, im) pairs) and no bit casts, so that code generators translating the jaxpr (kernelax)
+cover it; its loops are while loops over the series terms, as many as the C kernel's bound gives.  Same method as
+c/include/matfun/gmf_kernel.hpp (theory.md, "General matrices"):
 
   * eigenvalues mu = m + x of A (scaled by a power of two sig), x of S = A - m I in closed form (trigonometric /
     Cardano on the traceless, normalized deviator); eigenvalues far from m refined (Newton on det(A - mu I) with

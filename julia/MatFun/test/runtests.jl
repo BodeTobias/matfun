@@ -55,9 +55,9 @@ const VI = [1 4 5; 4 2 6; 5 6 3]
 const W = [a == b ? 1.0 : 0.5 for a in 1:3, b in 1:3]
 
 # bytes allocated by one call after a warm-up call (concrete argument types, no splatting)
-function alloc_single(F, J, H, kind, v, al)
-    smf!(F, J, H, kind, v; alpha = al)
-    return @allocated smf!(F, J, H, kind, v; alpha = al)
+function alloc_single(F, J, H, kind, v, al, f! = smf!)
+    f!(F, J, H, kind, v; alpha = al)
+    return @allocated f!(F, J, H, kind, v; alpha = al)
 end
 function alloc_batch(F, J, H, kind, V, al)
     smf!(F, J, H, kind, V; alpha = al)
@@ -296,6 +296,11 @@ end
         @test_throws ArgumentError gmf(:pow, R)
         @test_throws DimensionMismatch gmf(:exp, zeros(2, 2))
         @test_throws ArgumentError gmf!(zeros(3, 3), nothing, zeros(3, 3, 3, 3, 3, 3), :exp, R)
+        Fs, Js, Hs = zeros(3, 3), zeros(3, 3, 3, 3), zeros(3, 3, 3, 3, 3, 3)
+        for (kind, al) in ((SMF_EXP, 0.0), (SMF_LOG, 0.0), (SMF_POW, 1.7), (SMF_SQRT, 0.0))   # one matrix: no allocation
+            @test alloc_single(Fs, Js, Hs, kind, R, al, gmf!) == 0
+            @test alloc_single(Fs, nothing, nothing, kind, R, al, gmf!) == 0
+        end
     end
 
     @testset "gmf: ForwardDiff, J = dF/dA, H = dJ/dA" begin

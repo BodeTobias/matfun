@@ -43,10 +43,46 @@ def jrel(x, y):
 @pytest.mark.parametrize("dev", DEVICES, ids=lambda d: d.platform)
 def test_jax_dispatch(dev):
     with jax.default_device(dev):
-        expect = {"cpu": mf._lib is not None, "gpu": mf._lib_cuda is not None}[dev.platform]
-        for A in (jnp.asarray(voigt(spd((8,)))), jnp.asarray(spd((8,)))):
+        fams = {"cpu": mf._fams_cpu, "gpu": mf._fams_cuda}[dev.platform]
+        for A, fam in ((jnp.asarray(voigt(spd((8,)))), "voigt"), (jnp.asarray(spd((8,))), "matrix")):
             calls = custom_calls(lambda A: mf.smf("log", A, order=2), A)
-            assert calls == (["matfun_value_jac_hess"] if expect else []), calls
+            target = mf._TARGETS[fam if fam in fams else "voigt"][2]     # matrices: else the Voigt kernel
+            assert calls == ([target] if fams else []), calls
+
+
+def test_jax_trace_without_the_pure_version():
+    """tracing needs only the shapes (the pure-JAX version is not traced, e.g. no while loops of gmf); derivatives too"""
+    for f, A in ((lambda A: mf.gmf("log", A, order=2), gen_matrices(4, 0)),
+                 (jax.hessian(lambda A: jnp.sum(mf.smf("log", A) ** 2)), spd(()))):
+        txt = str(jax.make_jaxpr(f)(jnp.asarray(A)))
+        assert "matfun" in txt and "while" not in txt
+
+
+def test_jax_export():
+    """exported for the CPU alone and for CPU and CUDA (kernel or pure JAX per platform), the CPU module runs"""
+    from jax import export
+    A = spd((5,), 2)
+    f = jax.jit(lambda A: (mf.smf("log", A, order=2), mf.gmf("log", A, order=1),
+                           mf.smf("sqrt", A[..., (0, 1, 2, 0, 0, 1), (0, 1, 2, 1, 2, 2)], order=1)))
+    ref = jax.tree.leaves((matfun.smf("log", A, order=2), matfun.gmf("log", A, order=1),
+                           matfun.smf("sqrt", voigt(A), order=1)))
+    checks = [export.DisabledSafetyCheck.custom_call(t) for ts in mf._TARGETS.values() for t in ts]
+    with jax.default_device(jax.devices("cpu")[0]):
+        for platforms in (("cpu",), ("cpu", "cuda")):
+            out = export.export(f, platforms=platforms, disabled_checks=checks)(jnp.asarray(A)).call(jnp.asarray(A))
+            assert all(jrel(x, jnp.asarray(y)) < 1e-13 for x, y in zip(jax.tree.leaves(out), ref))
+
+
+def test_jax_kernelax_inlines_the_pure_version():
+    """kernelax builds C kernels from the primitive's impl (pure JAX), also of the derivatives"""
+    kernelax = pytest.importorskip("kernelax")
+    A = spd((8,), 3)
+    with jax.default_device(jax.devices("cpu")[0]):
+        F, J = jax.vmap(kernelax.kernel(lambda X: mf.smf("log", X, order=1), n_threads=1))(jnp.asarray(A))
+        G = jax.vmap(kernelax.kernel(jax.grad(lambda X: jnp.sum(mf.gmf("exp", X) ** 2)), n_threads=1))(jnp.asarray(A))
+        ref = jax.vmap(jax.grad(lambda X: jnp.sum(mf.gmf("exp", X) ** 2)))(jnp.asarray(A))
+    assert all(jrel(x, jnp.asarray(y)) < 1e-13 for x, y in zip((F, J), matfun.smf("log", A, order=1)))
+    assert jrel(G, ref) < 1e-13
 
 
 @pytest.mark.parametrize("dev", DEVICES, ids=lambda d: d.platform)
@@ -62,7 +98,7 @@ def test_jax_vs_capi(dev, kind, alpha):
                 for x, y in zip(o if order else (o,), ref):
                     assert x.shape == y.shape and jrel(x, jnp.asarray(y)) < 1e-13
         k, a = ("pow", 0.5) if kind == "sqrt" else (kind, alpha)
-        pure = mf._impl(2, k, a)(jnp.asarray(voigt(A)))
+        pure = mf._pure(jnp.asarray(voigt(A)), fam="voigt", order=2, kind=k, alpha=a)
         for x, y in zip(pure, matfun.smf(kind, voigt(A), alpha, order=2)):
             assert jrel(x, jnp.asarray(y)) < 1e-13
 
@@ -136,7 +172,7 @@ def test_jax_matrix_symmetries_and_check(dev):
 
 @pytest.mark.parametrize("dev", DEVICES, ids=lambda d: d.platform)
 def test_jax_float32_with_x64(dev):
-    """float32 input with jax_enable_x64 (pure-JAX path, the kernels are float64 only): results and derivatives stay
+    """float32 input with jax_enable_x64 (the float64 kernels, pure JAX without): results and derivatives stay
     float32. Precision "highest": on GPUs, float32 matrix products default to TF32 (errors ~1e-4)"""
     A = spd((), 3)
     with jax.default_device(dev), jax.default_matmul_precision("highest"):
@@ -161,7 +197,8 @@ def test_jax_extreme_scales_and_large_alpha(dev, kind, alpha, scale):
         out = mf.smf(kind, jnp.asarray(V), alpha, order=1)
         for x, y in zip(out, ref):
             assert np.all(np.isfinite(y)) and jrel(x, jnp.asarray(y)) < 1e-13
-        pure = mf._impl(1, *mf._norm(kind, alpha))(jnp.asarray(V))     # pure JAX: other rounding, x^alpha cond. alpha
+        k, a = mf._norm(kind, alpha)                                   # pure JAX: other rounding, x^alpha cond. alpha
+        pure = mf._pure(jnp.asarray(V), fam="voigt", order=1, kind=k, alpha=a)
         for x, y in zip(pure, ref):
             assert jrel(x, jnp.asarray(y)) < max(1e-13, 10 * (alpha or 1) * np.finfo(float).eps)
 
@@ -185,7 +222,8 @@ def test_jaxpure_scaling_is_an_exact_power_of_two():
 def test_jaxpure_has_no_bit_casts():
     """the pure-JAX path (F, J, H) uses no bit-level operations (frexp, ldexp, bit casts, shifts), so that code
     generators translating the jaxpr (autopdex C element kernels) can take it"""
-    txt = str(jax.make_jaxpr(mf._impl(2, "log", 0.0))(jnp.ones((2, 6)))).lower()
+    txt = str(jax.make_jaxpr(lambda v: mf._pure(v, fam="voigt", order=2, kind="log", alpha=0.0))(jnp.ones((2, 6))))
+    txt = txt.lower()
     assert not [w for w in ("bitcast", "frexp", "ldexp", "shift_", "ffi_call", "callback") if w in txt]
 
 
@@ -203,7 +241,7 @@ def gen_matrices(n, seed):
 @pytest.mark.parametrize("dev", DEVICES, ids=lambda d: d.platform)
 def test_jax_gmf_dispatch(dev):
     with jax.default_device(dev):
-        expect = {"cpu": mf._gen_cpu, "gpu": mf._gen_cuda}[dev.platform]
+        expect = "general" in {"cpu": mf._fams_cpu, "gpu": mf._fams_cuda}[dev.platform]
         A = jnp.asarray(gen_matrices(8, 0))
         calls = custom_calls(lambda A: mf.gmf("log", A, order=2), A)
         assert calls == (["matfun_gen_value_jac_hess"] if expect else []), calls
@@ -220,7 +258,8 @@ def test_jax_gmf_vs_capi(dev, kind, alpha):
             o = mf.gmf(kind, jnp.asarray(A), alpha, order=order)
             for x, y in zip(o if order else (o,), ref):
                 assert x.shape == y.shape and jrel(x, jnp.asarray(y)) < 1e-13
-        pure = mf._gimpl(2, *mf._norm(kind, alpha))(jnp.asarray(A))
+        k, a = mf._norm(kind, alpha)
+        pure = mf._pure(jnp.asarray(A), fam="general", order=2, kind=k, alpha=a)
         for x, y in zip(pure, ref):
             assert jrel(x, jnp.asarray(y)) < 1e-13
 
@@ -257,7 +296,7 @@ def test_jax_gmf_vs_independent_references(dev):
 
 @pytest.mark.parametrize("dev", DEVICES, ids=lambda d: d.platform)
 def test_jax_gmf_float32_with_x64(dev):
-    """float32 input (pure-JAX path): results stay float32, close to float64"""
+    """float32 input (the float64 kernels, pure JAX without): results stay float32, close to float64"""
     A = gen_matrices(4, 5)
     with jax.default_device(dev), jax.default_matmul_precision("highest"):
         out = mf.gmf("log", jnp.asarray(A, jnp.float32), order=2)
@@ -267,9 +306,10 @@ def test_jax_gmf_float32_with_x64(dev):
 
 
 def test_jaxgen_has_no_bit_casts():
-    """the pure-JAX gmf (F, J, H) uses no bit-level operations (code generators that translate the jaxpr, cjit, take
+    """the pure-JAX gmf (F, J, H) uses no bit-level operations (code generators that translate the jaxpr, kernelax, take
     it; its while loops over the series terms too, also nested in a local Newton loop)"""
-    txt = str(jax.make_jaxpr(mf._gimpl(2, "log", 0.0))(jnp.ones((2, 3, 3)))).lower()
+    txt = str(jax.make_jaxpr(lambda A: mf._pure(A, fam="general", order=2, kind="log", alpha=0.0))(jnp.ones((2, 3, 3))))
+    txt = txt.lower()
     assert not [w for w in ("bitcast", "frexp", "ldexp", "shift_", "ffi_call", "callback") if w in txt]
 
 

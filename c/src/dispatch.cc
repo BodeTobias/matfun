@@ -86,7 +86,14 @@ Impl choose_among(bool honour_env) {
 }  // namespace
 
 const Impl &impl() {
-  static const Impl chosen = choose_among(true);
+  static const Impl chosen = [] {
+    Impl c = choose_among(true);
+    const char *force = std::getenv("MATFUN_SIMD");
+    const bool forced = force && std::strcmp(force, c.name) == 0;
+    c.fn1 = forced ? c.fn : smf_batch_scalar;
+    c.gfn1 = forced ? c.gfn : smf_gbatch_scalar;
+    return c;
+  }();
   return chosen;
 }
 

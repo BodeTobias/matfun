@@ -25,6 +25,21 @@ function _gseries(k::Kind, al::Float64)
     return b
 end
 
+# the table of a call: exp, log and sqrt computed once, other powers kept per task for the last alpha (as the C
+# kernel's series_table)
+const _GB_EXP, _GB_LOG, _GB_SQRT = _gseries(SMF_EXP, 0.0), _gseries(SMF_LOG, 0.0), _gseries(SMF_POW, 0.5)
+function _gtable(k::Kind, al::Float64)
+    k == SMF_EXP && return _GB_EXP
+    k == SMF_LOG && return _GB_LOG
+    al == 0.5 && return _GB_SQRT
+    tls = task_local_storage()
+    c = get(tls, :matfun_gseries, nothing)
+    if !(c isa Tuple{Float64,Vector{Float64}} && c[1] == al)
+        c = tls[:matfun_gseries] = (al, _gseries(k, al))
+    end
+    return (c::Tuple{Float64,Vector{Float64}})[2]
+end
+
 # terms of the group series (bound C(k+n, n) r^k |b_(n+k)|) and of the pole series (C(k+2, 2) q^k)
 function _gnterms(b, n::Int, r::Float64, q::Float64)
     M = 1
@@ -101,7 +116,7 @@ function _gdetlu(M, s)
     return sgn * P[1] * bb * (ee - dd / bb * cc)
 end
 
-# scratch arrays of one evaluation (allocated once per gmf! call and reused for all matrices of a chunk); flat,
+# scratch arrays of one evaluation (one per chunk of a batch, reused for its matrices; one matrix: _gwork); flat,
 # 0-based layouts as in the C++ kernel: matrices row-major (k = 3 row + column), r[9 m + k], D2[3 j + k],
 # D3[9 j + 3 k + l], Z[9 (3 m + n) + k], Yh[81 m + 9 de + fb]
 struct _GWork{W}
@@ -120,6 +135,9 @@ function _GWork{W}() where {W}
                      z(19), z(19), z(19), z(19), z(19), z(19), z(19), z(19), z(9), z(9), z(27),
                      z(9), z(9), z(9), z(27), z(27), z(27), z(81), z(243))
 end
+
+# workspace of the running task for one matrix (no allocation per call)
+_gwork(::Type{W}) where {W} = get!(_GWork{W}, task_local_storage(), _GWork{W})::_GWork{W}
 
 # eigenvalues of w.S (flat, row-major) into w.xr, w.xi: x[1] real, x[2], x[3] a real or a conjugate pair
 @inline function _groots!(w::_GWork{W}) where {W}
@@ -671,23 +689,22 @@ end
     gmf!(F, J, H, kind, A; alpha=0.0) -> F
 
 In-place version of [`gmf`](@ref): `F`, `J` (or `nothing`) and `H` (or `nothing`; needs `J`) of the sizes listed
-there are overwritten; multithreaded over chunks of matrices like [`smf!`](@ref).
+there are overwritten. For one matrix (Float64, `Array` outputs) it does not allocate; `n` matrices run multithreaded
+over chunks like [`smf!`](@ref).
 """
 function gmf!(F::AbstractArray, J::Union{Nothing,AbstractArray}, H::Union{Nothing,AbstractArray}, kind,
               A::AbstractArray; alpha::Real = 0.0)
-    k = tokind(kind)
-    al = _alpha(k, alpha)
+    kd = tokind(kind)
+    al = _alpha(kd, alpha)
     _check(J, H)
-    if k == SMF_SQRT
-        k = SMF_POW
-    end
+    k = kd == SMF_SQRT ? SMF_POW : kd              # (assigned once: captured by the threaded loop below)
     order = H !== nothing ? 2 : (J !== nothing ? 1 : 0)
-    bt = _gseries(k, al)
+    bt = _gtable(k, al)
     n = _glayout(A)
     T = _wtype(eltype(A))
     if n === nothing
         _chkout(F, J, H, (3, 3), (3, 3, 3, 3), (3, 3, 3, 3, 3, 3))
-        _grange!(_GWork{T}(), k, order, al, bt, F, J, H, A, 1, 1, Val(false))
+        _grange!(_gwork(T), k, order, al, bt, F, J, H, A, 1, 1, Val(false))
         return F
     end
     _chkout(F, J, H, (3, 3, n), (3, 3, 3, 3, n), (3, 3, 3, 3, 3, 3, n))

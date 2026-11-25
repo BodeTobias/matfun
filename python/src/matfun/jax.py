@@ -14,9 +14,10 @@ f((A + A^T)/2), the same as J.  Matrices must be symmetric; since no error can b
 of a matrix with |A_ij - A_ji| > 1e-8 max |A_kl| (float32: 1e-4) are NaN.  gmf: log, sqrt and pow give NaN for a
 matrix with a real eigenvalue <= 0.
 
-Which code runs is decided per backend when a function is compiled (jax.lax.platform_dependent): the C kernel of
-libmatfun on the CPU, the CUDA kernel of the plugin matfun-cuda13 / matfun-cuda12 on NVIDIA GPUs
-(pip install "matfun[cuda13]"), pure JAX otherwise (other backends, float32).
+Which code runs is decided per backend when a function is lowered (a primitive with a lowering per platform): the C
+kernel of libmatfun on the CPU, the CUDA kernel of the plugin matfun-cuda13 / matfun-cuda12 on NVIDIA GPUs
+(pip install "matfun[cuda13]"), float32 in float64 there (with jax_enable_x64); pure JAX otherwise (other backends).
+The pure-JAX version is also the primitive's impl, for tools that inline primitives.
 MATFUN_LIB / MATFUN_CUDA_LIB override the library paths.
 """
 import ctypes
@@ -29,6 +30,8 @@ import warnings
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.extend.core import Primitive
+from jax.interpreters import batching, mlir
 
 from . import _capi
 from . import _jaxgen as _gmf
@@ -37,8 +40,16 @@ from . import _jaxpure as _smf
 __all__ = ["smf", "gmf"]
 
 _KIND = {"exp": 0, "log": 1, "pow": 2, "sqrt": 3}
-_TARGETS = ("matfun_value", "matfun_value_jac", "matfun_value_jac_hess")
-_GTARGETS = ("matfun_gen_value", "matfun_gen_value_jac", "matfun_gen_value_jac_hess")
+# families: Voigt vectors and symmetric matrices (smf), general matrices (gmf); targets and handler symbols per order
+_TARGETS = {"voigt": ("matfun_value", "matfun_value_jac", "matfun_value_jac_hess"),
+            "matrix": ("matfun_matrix_value", "matfun_matrix_value_jac", "matfun_matrix_value_jac_hess"),
+            "general": ("matfun_gen_value", "matfun_gen_value_jac", "matfun_gen_value_jac_hess")}
+_SYMBOLS = {"voigt": ("SmfValue", "SmfValueJac", "SmfValueJacHess"),
+            "matrix": ("SmfMatrixValue", "SmfMatrixValueJac", "SmfMatrixValueJacHess"),
+            "general": ("GmfValue", "GmfValueJac", "GmfValueJacHess")}
+_SHAPES = {"voigt": ((6,), (6, 6), (6, 6, 6)), "matrix": ((3, 3), (3, 3, 3, 3), (3, 3, 3, 3, 3, 3))}
+_SHAPES["general"] = _SHAPES["matrix"]
+_NIN = {"voigt": 1, "matrix": 2, "general": 2}              # trailing axes of one input
 
 
 def _jaxlib_ffi_api():
@@ -52,35 +63,35 @@ def _jaxlib_ffi_api():
         return None
 
 
-def _register(lib, symbols, platform, targets=_TARGETS):
-    """register the handlers of lib, unless the jaxlib is too old for them: a rejected handler would make XLA fail to
-    initialise the whole backend (then matfun.jax uses pure JAX instead)"""
+def _register(lib, platform, suffix=""):
+    """register the handlers of lib; the families it has (a library older than a family has none of its symbols).
+    OSError if the jaxlib is too old for them: a rejected handler would make XLA fail to initialise the whole backend
+    (then matfun.jax uses pure JAX instead)"""
     ours, theirs = lib.smf_xla_ffi_api_version(), _jaxlib_ffi_api()
     if theirs is not None and (ours // 1000 != theirs // 1000 or ours % 1000 > theirs % 1000):
         warnings.warn(f"matfun: {os.path.basename(lib._name)} needs XLA FFI API >= {ours // 1000}.{ours % 1000}, the "
                       f"installed jaxlib has {theirs // 1000}.{theirs % 1000}; using pure JAX on {platform}",
                       RuntimeWarning, stacklevel=2)
         raise OSError("incompatible XLA FFI API")
-    caps = [getattr(lib, sym) for sym in symbols]            # all or none (AttributeError: older library)
-    for name, cap in zip(targets, caps):
-        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(cap), platform=platform)
-
-
-def _register_gen(lib, symbols, platform):
-    """the handlers of gmf; False if lib has none (a library older than gmf: then gmf uses pure JAX there)"""
-    try:
-        _register(lib, symbols, platform, _GTARGETS)
-        return True
-    except (OSError, AttributeError):
-        return False
+    fams = set()
+    for fam, symbols in _SYMBOLS.items():
+        try:
+            caps = [getattr(lib, sym + suffix) for sym in symbols]
+        except AttributeError:
+            continue
+        for name, cap in zip(_TARGETS[fam], caps):
+            jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(cap), platform=platform)
+        fams.add(fam)
+    if "voigt" not in fams:
+        raise AttributeError("no matfun handlers")
+    return frozenset(fams)
 
 
 try:                                    # C kernel (built with MATFUN_WITH_XLA_FFI)
     _lib = ctypes.cdll.LoadLibrary(_capi.library_path())
-    _register(_lib, ("SmfValue", "SmfValueJac", "SmfValueJacHess"), "cpu")
-    _gen_cpu = _register_gen(_lib, ("GmfValue", "GmfValueJac", "GmfValueJacHess"), "cpu")
+    _fams_cpu = _register(_lib, "cpu")
 except (OSError, AttributeError):
-    _lib, _gen_cpu = None, False
+    _lib, _fams_cpu = None, frozenset()
 
 
 _PLUGINS = ("matfun_cuda13", "matfun_cuda12")
@@ -103,28 +114,13 @@ def _load_cuda():
     for path in _cuda_candidates():     # the first one that loads (its libcudart must be found) and registers
         try:
             lib = ctypes.cdll.LoadLibrary(path)
-            _register(lib, ("SmfValueCuda", "SmfValueJacCuda", "SmfValueJacHessCuda"), "CUDA")
-            return lib, path
+            return lib, path, _register(lib, "CUDA", "Cuda")
         except (OSError, AttributeError):
             continue
-    return None, None
+    return None, None, frozenset()
 
 
-_lib_cuda, _lib_cuda_path = _load_cuda()
-_gen_cuda = _lib_cuda is not None and _register_gen(_lib_cuda, ("GmfValueCuda", "GmfValueJacCuda",
-                                                                "GmfValueJacHessCuda"), "CUDA")
-
-
-def _dispatch(name, nout, v, kind, alpha, jax_impl):
-    """compiled kernel on CPU / CUDA where available (chosen per backend at compile time), else jax_impl"""
-    branches = {}
-    if _lib is not None:
-        branches["cpu"] = lambda v: _ffi(name, v, kind, alpha, nout)
-    if _lib_cuda is not None:
-        branches["cuda"] = lambda v: _ffi(name, v, kind, alpha, nout)
-    if not branches or v.dtype != jnp.float64:
-        return jax_impl(v)
-    return jax.lax.platform_dependent(v, default=jax_impl, **branches)
+_lib_cuda, _lib_cuda_path, _fams_cuda = _load_cuda()
 
 
 def _norm(kind, alpha):
@@ -147,116 +143,134 @@ def _norm(kind, alpha):
 
 
 # --------------------------------------------------------------------------------------
-# Voigt vectors v (..., 6) -> F (..., 6), J (..., 6, 6), H (..., 6, 6, 6): compiled kernel or pure-JAX fallback
+# matrix layout of symmetric matrices: input (A + A^T)/2, results from the Voigt layout
 # --------------------------------------------------------------------------------------
-_SHAPES = ((6,), (6, 6), (6, 6, 6))
-
-
-def _ffi(name, v, kind, alpha, nout):
-    """nout = 1: F;  2: F, J;  3: F, J, H"""
-    out = [jax.ShapeDtypeStruct(v.shape[:-1] + s, v.dtype) for s in _SHAPES[:nout]]
-    res = jax.ffi.ffi_call(name, out, vmap_method="broadcast_all")(v, kind=np.int64(_KIND[kind]), alpha=np.float64(alpha))
-    return tuple(res) if nout > 1 else res[0]
-
-
-def _impl(order, kind, alpha):
-    """pure-JAX version of the kernel: v (..., 6) -> (F,), (F, J) or (F, J, H)"""
-    jkind, jalpha = ("pow", 0.5) if kind == "sqrt" else (kind, alpha if kind == "pow" else None)
-
-    def f(v):
-        out = jax.vmap(lambda u: _smf.evaluate(jkind, jalpha, u, order))(v.reshape(-1, 6))
-        return tuple(x.reshape(v.shape[:-1] + x.shape[1:]) for x in out)
-    return f
-
-
-@functools.lru_cache(maxsize=None)
-def _make_vjh(kind, alpha):
-    """(F, J, H); third derivative = NaN"""
-    @jax.custom_jvp
-    def vjh(v):
-        return _dispatch("matfun_value_jac_hess", 3, v, kind, alpha, _impl(2, kind, alpha))
-
-    @vjh.defjvp
-    def vjh_jvp(primals, tangents):
-        out = vjh(primals[0])
-        return out, tuple(jnp.full_like(x, jnp.nan) for x in out)
-
-    return vjh
-
-
-@functools.lru_cache(maxsize=None)
-def _make_vj(kind, alpha):
-    """(F, J) with derivative rule dF = J dv, dJ = H dv (H from the kernel), so that second derivatives also run
-    through the compiled kernel"""
-    @jax.custom_jvp
-    def vj(v):
-        return _dispatch("matfun_value_jac", 2, v, kind, alpha, _impl(1, kind, alpha))
-
-    @vj.defjvp
-    def vj_jvp(primals, tangents):
-        (v,), (dv,) = primals, tangents
-        Fv, J, H = _make_vjh(kind, alpha)(v)
-        return (Fv, J), (jnp.einsum("...ip,...p->...i", J, dv), jnp.einsum("...ipq,...q->...ip", H, dv))
-
-    return vj
-
-
-@functools.lru_cache(maxsize=None)
-def _make_v(kind, alpha):
-    """F with derivative rule dF = J dv (J, and H for second derivatives, from the kernel)"""
-    @jax.custom_jvp
-    def v_(v):
-        return _dispatch("matfun_value", 1, v, kind, alpha, lambda v: _impl(0, kind, alpha)(v)[0])
-
-    @v_.defjvp
-    def v_jvp(primals, tangents):
-        (v,), (dv,) = primals, tangents
-        Fv, J = _make_vj(kind, alpha)(v)
-        return Fv, jnp.einsum("...ip,...p->...i", J, dv)
-
-    return v_
-
-
-# --------------------------------------------------------------------------------------
-# matrices: Voigt vector of A in, results expanded to the matrix layout (linear, differentiated by JAX itself)
-# --------------------------------------------------------------------------------------
-_VI = np.array([[0, 3, 4], [3, 1, 5], [4, 5, 2]])        # Voigt index of A_ab
 _W = np.where(np.eye(3, dtype=bool), 1.0, 0.5)           # dv / dA_cd for the symmetric part (A + A^T)/2
+_PV = np.zeros((6, 3, 3))                                # 1 where A_ab is the Voigt component k
+for _k, (_a, _b) in enumerate(((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))):
+    _PV[_k, _a, _b] = _PV[_k, _b, _a] = 1.0
 
 
-def _from_matrix(A):
-    """Voigt vectors (..., 6) of the symmetric parts of A (..., 3, 3); NaN for a matrix that is not symmetric"""
+def _sym(A):
+    """(A + A^T)/2 (exactly symmetric); NaN for a matrix that is not symmetric"""
     S = 0.5 * (A + jnp.swapaxes(A, -1, -2))
-    v = jnp.stack([S[..., i, j] for i, j in ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))], axis=-1)
     B = jax.lax.stop_gradient(A)
     tol = 1e-8 if A.dtype == jnp.float64 else 1e-4
     asym = jnp.max(jnp.abs(B - jnp.swapaxes(B, -1, -2)), axis=(-2, -1)) > tol * jnp.max(jnp.abs(B), axis=(-2, -1))
-    return jnp.where(asym[..., None], jnp.nan, v)
+    return jnp.where(asym[..., None, None], jnp.nan, S)
+
+
+# (contractions with constant tensors rather than index gathers: their transposes in reverse mode stay dense)
+def _voigt(S):
+    """Voigt vector of a symmetric S"""
+    return jnp.einsum("...ab,kab->...k", S, jnp.asarray(_PV * _W, S.dtype))
 
 
 def _to_matrix(out):
-    """(F,), (F, J), (F, J, H) in the Voigt layout -> matrix layout: F_ab = Fv[VI_ab], J_abcd = Jv[VI_ab, VI_cd] W_cd,
-    H_abcdef = Hv[VI_ab, VI_cd, VI_ef] W_cd W_ef"""
-    W = jnp.asarray(_W, out[0].dtype)
-    res = [out[0][..., _VI]]
+    """(F,), (F, J), (F, J, H) in the Voigt layout -> matrix layout: F_ab = Fv[k(a, b)], J_abcd = Jv[k(a, b), k(c, d)] W_cd,
+    H_abcdef = Hv[k(a, b), k(c, d), k(e, f)] W_cd W_ef"""
+    P, PW = jnp.asarray(_PV, out[0].dtype), jnp.asarray(_PV * _W, out[0].dtype)
+    res = [jnp.einsum("...k,kab->...ab", out[0], P)]
     if len(out) > 1:
-        res.append(out[1][..., _VI[:, :, None, None], _VI] * W)
+        res.append(jnp.einsum("...kl,kab,lcd->...abcd", out[1], P, PW))
     if len(out) > 2:
-        res.append(out[2][..., _VI[:, :, None, None, None, None], _VI[:, :, None, None], _VI] * (W[:, :, None, None] * W))
+        res.append(jnp.einsum("...klm,kab,lcd,mef->...abcdef", out[2], P, PW, PW))
     return tuple(res)
 
 
-@functools.lru_cache(maxsize=None)
-def _jitted(kind, alpha, order, mat):
-    core = (_make_v, _make_vj, _make_vjh)[order](kind, alpha)
-    if not mat:
-        return jax.jit(core)
+# --------------------------------------------------------------------------------------
+# primitive: x -> (F,), (F, J) or (F, J, H) of a family.  Tracing only needs the shapes; lowered to the kernel on a
+# platform that has one, else to pure JAX, which is also the impl
+# --------------------------------------------------------------------------------------
+def _pure(x, *, fam, order, kind, alpha):
+    """pure-JAX version of the kernels"""
+    if fam == "matrix":
+        return _to_matrix(_pure(_voigt(x), fam="voigt", order=order, kind=kind, alpha=alpha))
+    jkind, jalpha = ("pow", 0.5) if kind == "sqrt" else (kind, alpha)
+    k = _NIN[fam]
+    evaluate = _smf.evaluate if fam == "voigt" else _gmf.evaluate
+    out = jax.vmap(lambda u: evaluate(jkind, jalpha, u, order))(x.reshape((-1,) + x.shape[-k:]))
+    return tuple(y.reshape(x.shape[:-k] + y.shape[1:]) for y in out)
 
-    def f(A):
-        out = core(_from_matrix(A))
-        out = _to_matrix(out if order else (out,))
-        return out if order else out[0]
-    return jax.jit(f)
+
+def _abstract(x, *, fam, order, kind, alpha):
+    return [jax.core.ShapedArray(x.shape[:-_NIN[fam]] + s, x.dtype) for s in _SHAPES[fam][:order + 1]]
+
+
+def _lowering(fams):
+    """lowering of a platform with the kernels of the families fams: matrices through the Voigt kernel where the
+    matrix one is missing; float32 in float64 (if x64 is enabled); pure JAX for other dtypes"""
+    def lower(x, *, fam, order, kind, alpha):
+        p = dict(order=order, kind=kind, alpha=alpha)
+        if x.dtype == jnp.float32 and jax.dtypes.canonicalize_dtype(np.float64) == np.float64:
+            return tuple(y.astype(x.dtype) for y in lower(x.astype(jnp.float64), fam=fam, **p))
+        if x.dtype != jnp.float64 or fam not in fams and (fam != "matrix" or "voigt" not in fams):
+            return _pure(x, fam=fam, **p)
+        if fam not in fams:
+            return _to_matrix(lower(_voigt(x), fam="voigt", **p))
+        out = [jax.ShapeDtypeStruct(x.shape[:-_NIN[fam]] + s, x.dtype) for s in _SHAPES[fam][:order + 1]]
+        res = jax.ffi.ffi_call(_TARGETS[fam][order], out)(x, kind=np.int64(_KIND[kind]), alpha=np.float64(alpha))
+        return tuple(res)
+    return lower
+
+
+def _batch(args, dims, **params):
+    (x,), (d,) = args, dims
+    return _p.bind(jnp.moveaxis(x, d, 0), **params), (0,) * (params["order"] + 1)
+
+
+_p = Primitive("matfun")
+_p.multiple_results = True
+_p.def_impl(_pure)
+_p.def_abstract_eval(_abstract)
+batching.primitive_batchers[_p] = _batch
+mlir.register_lowering(_p, mlir.lower_fun(_pure, multiple_results=True))
+if _lib is not None:
+    mlir.register_lowering(_p, mlir.lower_fun(_lowering(_fams_cpu), multiple_results=True), platform="cpu")
+if _lib_cuda is not None:
+    mlir.register_lowering(_p, mlir.lower_fun(_lowering(_fams_cuda), multiple_results=True), platform="cuda")
+
+
+# --------------------------------------------------------------------------------------
+# derivatives: dF = J dx, dJ = H dx with J and H of the next order (so that second derivatives also run through the
+# kernel); the derivative of H is NaN
+# --------------------------------------------------------------------------------------
+_EINSUM = {1: ("...ip,...p->...i", "...ipq,...q->...ip"), 2: ("...abcd,...cd->...ab", "...abcdef,...ef->...abcd")}
+
+
+@functools.lru_cache(maxsize=None)
+def _make(fam, kind, alpha, order):
+    """order 0: F, 1: (F, J), 2: (F, J, H), differentiable"""
+    ein = _EINSUM[_NIN[fam]]
+
+    @jax.custom_jvp
+    def g(x):
+        out = _p.bind(x, fam=fam, order=order, kind=kind, alpha=alpha)
+        return tuple(out) if order else out[0]
+
+    @g.defjvp
+    def g_jvp(primals, tangents):
+        (x,), (dx,) = primals, tangents
+        if fam == "matrix":             # (symmetric x, dx) through the Voigt chain: J, H with 36, 216 instead of 81, 729
+            v = _make("voigt", kind, alpha, order)
+            return jax.jvp(lambda S: _to_matrix(v(_voigt(S)) if order else (v(_voigt(S)),))[slice(None) if order else 0],
+                           primals, tangents)
+        if order == 2:
+            out = g(x)
+            return out, tuple(jnp.full_like(y, jnp.nan) for y in out)
+        nxt = _make(fam, kind, alpha, order + 1)(x)
+        dF = jnp.einsum(ein[0], nxt[1], dx)
+        if order == 0:
+            return nxt[0], dF
+        return nxt[:2], (dF, jnp.einsum(ein[1], nxt[2], dx))
+
+    return g
+
+
+@functools.lru_cache(maxsize=None)
+def _jitted(fam, kind, alpha, order):
+    g = _make(fam, kind, alpha, order)
+    return jax.jit((lambda A: g(_sym(A))) if fam == "matrix" else g)
 
 
 def smf(kind, A, alpha=None, order=0):
@@ -270,83 +284,10 @@ def smf(kind, A, alpha=None, order=0):
     kind, alpha = _norm(kind, alpha)
     A = jnp.asarray(A)
     if A.shape[-2:] == (3, 3):
-        return _jitted(kind, alpha, order, True)(A)
+        return _jitted("matrix", kind, alpha, order)(A)
     if A.shape[-1:] == (6,):
-        return _jitted(kind, alpha, order, False)(A)
+        return _jitted("voigt", kind, alpha, order)(A)
     raise ValueError(f"expected matrices (..., 3, 3) or Voigt vectors (..., 6), got shape {A.shape}")
-
-
-# --------------------------------------------------------------------------------------
-# general matrices: A (..., 3, 3) -> F (..., 3, 3), J (..., 3, 3, 3, 3), H (..., 3, 3, 3, 3, 3, 3)
-# --------------------------------------------------------------------------------------
-_GSHAPES = ((3, 3), (3, 3, 3, 3), (3, 3, 3, 3, 3, 3))
-
-
-def _gffi(name, A, kind, alpha, nout):
-    out = [jax.ShapeDtypeStruct(A.shape[:-2] + s, A.dtype) for s in _GSHAPES[:nout]]
-    res = jax.ffi.ffi_call(name, out, vmap_method="broadcast_all")(A, kind=np.int64(_KIND[kind]),
-                                                                   alpha=np.float64(alpha))
-    return tuple(res)
-
-
-def _gimpl(order, kind, alpha):
-    """pure-JAX version of the kernel: A (..., 3, 3) -> (F,), (F, J) or (F, J, H)"""
-    jkind, jalpha = ("pow", 0.5) if kind == "sqrt" else (kind, alpha)
-
-    def f(A):
-        out = jax.vmap(lambda X: _gmf.evaluate(jkind, jalpha, X, order))(A.reshape(-1, 3, 3))
-        return tuple(x.reshape(A.shape[:-2] + x.shape[1:]) for x in out)
-    return f
-
-
-def _gdispatch(order, A, kind, alpha):
-    """compiled kernel on CPU / CUDA where available (chosen per backend at compile time), else pure JAX"""
-    name, nout = _GTARGETS[order], order + 1
-    branches = {}
-    if _gen_cpu:
-        branches["cpu"] = lambda A: _gffi(name, A, kind, alpha, nout)
-    if _gen_cuda:
-        branches["cuda"] = lambda A: _gffi(name, A, kind, alpha, nout)
-    impl = _gimpl(order, kind, alpha)
-    if not branches or A.dtype != jnp.float64:
-        return impl(A)
-    return jax.lax.platform_dependent(A, default=impl, **branches)
-
-
-@functools.lru_cache(maxsize=None)
-def _gmake(kind, alpha, order):
-    """order 0: F, 1: (F, J), 2: (F, J, H), differentiable: dF = J dA, dJ = H dA (from the kernel of the next order);
-    the derivative of H is NaN"""
-    if order == 2:
-        @jax.custom_jvp
-        def g(A):
-            return _gdispatch(2, A, kind, alpha)
-
-        @g.defjvp
-        def g_jvp(primals, tangents):
-            out = g(primals[0])
-            return out, tuple(jnp.full_like(x, jnp.nan) for x in out)
-        return g
-
-    @jax.custom_jvp
-    def g(A):
-        out = _gdispatch(order, A, kind, alpha)
-        return out if order else out[0]
-
-    @g.defjvp
-    def g_jvp(primals, tangents):
-        (A,), (dA,) = primals, tangents
-        nxt = _gmake(kind, alpha, order + 1)(A)
-        dF = jnp.einsum("...abcd,...cd->...ab", nxt[1], dA)
-        if order == 0:
-            return nxt[0], dF
-        return nxt[:2], (dF, jnp.einsum("...abcdef,...ef->...abcd", nxt[2], dA))
-    return g
-
-
-@functools.lru_cache(maxsize=None)
-def _gjitted(kind, alpha, order):
-    return jax.jit(_gmake(kind, alpha, order))
 
 
 def gmf(kind, A, alpha=None, order=0):
@@ -360,4 +301,4 @@ def gmf(kind, A, alpha=None, order=0):
     A = jnp.asarray(A)
     if A.shape[-2:] != (3, 3):
         raise ValueError(f"expected matrices (..., 3, 3), got shape {A.shape}")
-    return _gjitted(kind, alpha, order)(A)
+    return _jitted("general", kind, alpha, order)(A)
