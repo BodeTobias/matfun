@@ -4,6 +4,7 @@ Threads: OpenMP (OMP_NUM_THREADS).  Instruction set: chosen at run time (MATFUN_
 """
 import ctypes
 import glob
+import math
 import os
 
 import numpy as np
@@ -75,7 +76,7 @@ def smf(kind, A, alpha=None, order=0):
         raise ValueError(f"expected matrices (..., 3, 3) or Voigt vectors (..., 6), got shape {A.shape}")
     out = [np.empty(sh + s) for s in shapes[:order + 1]] + [None] * (2 - order)
     ptr = lambda a: None if a is None else a.ctypes.data
-    r = fn(KINDS[kind], float(alpha or 0.0), int(np.prod(sh, dtype=np.int64)), ptr(A), *map(ptr, out))
+    r = fn(KINDS[kind], float(alpha or 0.0), math.prod(sh), ptr(A), *map(ptr, out))
     if r == -3:
         raise ValueError("matrix input must be symmetric: |A_ij - A_ji| <= 1e-8 max |A_kl| for each matrix")
     if r != 0:
@@ -101,7 +102,7 @@ def gmf(kind, A, alpha=None, order=0):
     sh = A.shape[:-2]
     out = [np.empty(sh + s) for s in ((3, 3), (3, 3, 3, 3), (3, 3, 3, 3, 3, 3))[:order + 1]] + [None] * (2 - order)
     ptr = lambda a: None if a is None else a.ctypes.data
-    r = _load().gmf_eval(KINDS[kind], float(alpha or 0.0), int(np.prod(sh, dtype=np.int64)), ptr(A), *map(ptr, out))
+    r = _load().gmf_eval(KINDS[kind], float(alpha or 0.0), math.prod(sh), ptr(A), *map(ptr, out))
     if r != 0:
         raise ValueError(f"gmf_eval returned {r}")
     return tuple(out[:order + 1]) if order else out[0]
