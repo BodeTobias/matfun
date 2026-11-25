@@ -306,7 +306,7 @@ def test_jax_gmf_float32_with_x64(dev):
 
 
 def test_jaxgen_has_no_bit_casts():
-    """the pure-JAX gmf (F, J, H) uses no bit-level operations (code generators that translate the jaxpr, cjit, take
+    """the pure-JAX gmf (F, J, H) uses no bit-level operations (code generators that translate the jaxpr, kernelax, take
     it; its while loops over the series terms too, also nested in a local Newton loop)"""
     txt = str(jax.make_jaxpr(lambda A: mf._pure(A, fam="general", order=2, kind="log", alpha=0.0))(jnp.ones((2, 3, 3))))
     txt = txt.lower()
