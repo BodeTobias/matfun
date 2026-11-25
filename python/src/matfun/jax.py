@@ -145,8 +145,10 @@ def _norm(kind, alpha):
 # --------------------------------------------------------------------------------------
 # matrix layout of symmetric matrices: input (A + A^T)/2, results from the Voigt layout
 # --------------------------------------------------------------------------------------
-_VI = np.array([[0, 3, 4], [3, 1, 5], [4, 5, 2]])        # Voigt index of A_ab
 _W = np.where(np.eye(3, dtype=bool), 1.0, 0.5)           # dv / dA_cd for the symmetric part (A + A^T)/2
+_PV = np.zeros((6, 3, 3))                                # 1 where A_ab is the Voigt component k
+for _k, (_a, _b) in enumerate(((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))):
+    _PV[_k, _a, _b] = _PV[_k, _b, _a] = 1.0
 
 
 def _sym(A):
@@ -158,19 +160,21 @@ def _sym(A):
     return jnp.where(asym[..., None, None], jnp.nan, S)
 
 
+# (contractions with constant tensors rather than index gathers: their transposes in reverse mode stay dense)
 def _voigt(S):
-    return jnp.stack([S[..., i, j] for i, j in ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))], axis=-1)
+    """Voigt vector of a symmetric S"""
+    return jnp.einsum("...ab,kab->...k", S, jnp.asarray(_PV * _W, S.dtype))
 
 
 def _to_matrix(out):
-    """(F,), (F, J), (F, J, H) in the Voigt layout -> matrix layout: F_ab = Fv[VI_ab], J_abcd = Jv[VI_ab, VI_cd] W_cd,
-    H_abcdef = Hv[VI_ab, VI_cd, VI_ef] W_cd W_ef"""
-    W = jnp.asarray(_W, out[0].dtype)
-    res = [out[0][..., _VI]]
+    """(F,), (F, J), (F, J, H) in the Voigt layout -> matrix layout: F_ab = Fv[k(a, b)], J_abcd = Jv[k(a, b), k(c, d)] W_cd,
+    H_abcdef = Hv[k(a, b), k(c, d), k(e, f)] W_cd W_ef"""
+    P, PW = jnp.asarray(_PV, out[0].dtype), jnp.asarray(_PV * _W, out[0].dtype)
+    res = [jnp.einsum("...k,kab->...ab", out[0], P)]
     if len(out) > 1:
-        res.append(out[1][..., _VI[:, :, None, None], _VI] * W)
+        res.append(jnp.einsum("...kl,kab,lcd->...abcd", out[1], P, PW))
     if len(out) > 2:
-        res.append(out[2][..., _VI[:, :, None, None, None, None], _VI[:, :, None, None], _VI] * (W[:, :, None, None] * W))
+        res.append(jnp.einsum("...klm,kab,lcd,mef->...abcdef", out[2], P, PW, PW))
     return tuple(res)
 
 
@@ -247,6 +251,10 @@ def _make(fam, kind, alpha, order):
     @g.defjvp
     def g_jvp(primals, tangents):
         (x,), (dx,) = primals, tangents
+        if fam == "matrix":             # (symmetric x, dx) through the Voigt chain: J, H with 36, 216 instead of 81, 729
+            v = _make("voigt", kind, alpha, order)
+            return jax.jvp(lambda S: _to_matrix(v(_voigt(S)) if order else (v(_voigt(S)),))[slice(None) if order else 0],
+                           primals, tangents)
         if order == 2:
             out = g(x)
             return out, tuple(jnp.full_like(y, jnp.nan) for y in out)
