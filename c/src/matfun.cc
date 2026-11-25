@@ -7,6 +7,10 @@
 #include "dispatch.h"
 #include "matfun/smf_kernel.hpp"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifndef SMF_VERSION
 #define SMF_VERSION "0.0.0"
 #endif
@@ -48,7 +52,14 @@ bool run(const Call &c, int64_t lo, int64_t hi) {
   return sym;
 }
 
-int64_t chunk(const Call &c) { return c.H ? CHUNK_H : CHUNK; }
+// one task up to CHUNK matrices (CHUNK_H with H); a larger call about evenly over the threads, with at most CHUNK
+// and at least CHUNK / 4 matrices per task (general matrices, a few times the work each: CHUNK / 16), whole SIMD
+// vectors
+int64_t chunk(const Call &c, int threads) {
+  const int64_t mx = c.H ? CHUNK_H : CHUNK, mn = mx / (c.fam == GENERAL ? 16 : 4);
+  if (c.n <= mx) return mx;
+  return (std::clamp((c.n + threads - 1) / std::max(threads, 1), mn, mx) + 7) / 8 * 8;
+}
 
 }  // namespace smf_dispatch
 
@@ -57,7 +68,12 @@ namespace {
 // a call of the C API: chunks in parallel (OpenMP); 0, -1 (invalid arguments) or -3 (a matrix not symmetric)
 int eval(smf_dispatch::Call c) {
   if (!smf_dispatch::prepare(c)) return -1;
-  const int64_t ch = smf_dispatch::chunk(c), nchunks = (c.n + ch - 1) / ch;
+#ifdef _OPENMP
+  const int threads = omp_get_max_threads();
+#else
+  const int threads = 1;
+#endif
+  const int64_t ch = smf_dispatch::chunk(c, threads), nchunks = (c.n + ch - 1) / ch;
   if (nchunks <= 1)                              // small calls (e.g. one matrix): no OpenMP region
     return smf_dispatch::run(c, 0, c.n) ? 0 : -3;
   int asym = 0;

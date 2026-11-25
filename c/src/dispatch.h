@@ -47,7 +47,7 @@ bool prepare(Call &c);
 // matrices lo..hi-1 of a prepared call; false if one of them is not symmetric (MATRIX; its results are NaN)
 bool run(const Call &c, int64_t lo, int64_t hi);
 
-// matrices per task of a prepared call
-int64_t chunk(const Call &c);
+// matrices per task of a prepared call run by up to `threads` threads
+int64_t chunk(const Call &c, int threads);
 
 }  // namespace smf_dispatch

@@ -59,7 +59,8 @@ static ffi::Error Eval(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::Remai
                        (int64_t)x.element_count() / (FAM == smf_dispatch::VOIGT ? 6 : 9), x.typed_data(), p[0],
                        p[1], p[2]};
   if (!smf_dispatch::prepare(c)) return ffi::Error::InvalidArgument("matfun: invalid kind or alpha");
-  parallel_chunks(pool, c.n, smf_dispatch::chunk(c), [c](int64_t lo, int64_t hi) { smf_dispatch::run(c, lo, hi); });
+  parallel_chunks(pool, c.n, smf_dispatch::chunk(c, (int)pool.num_threads() + 1),
+                  [c](int64_t lo, int64_t hi) { smf_dispatch::run(c, lo, hi); });
   return ffi::Error::Success();
 }
 
