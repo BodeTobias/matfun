@@ -1,9 +1,10 @@
 // matfun_xla.cc -- XLA FFI handlers (CPU) for JAX, part of libmatfun when built with MATFUN_WITH_XLA_FFI.
-// The batch is split over XLA's intra-op thread pool (not OpenMP).  Targets, registered by matfun/jax.py:
-//   SmfValue (x -> F), SmfValueJac (x -> F, J), SmfValueJacHess (x -> F, J, H); attributes kind (int64), alpha (f64);
-//   Voigt layout as smf_eval: x (..., 6), F (..., 6), J (..., 6, 6), H (..., 6, 6, 6)
-//   GmfValue, GmfValueJac, GmfValueJacHess: general matrices as gmf_eval, x (..., 3, 3), F (..., 3, 3), J (..., 3, 3,
-//   3, 3), H (..., 3, 3, 3, 3, 3, 3)
+// The batch is split over XLA's intra-op thread pool (not OpenMP).  Each handler takes x and returns F, (F, J) or
+// (F, J, H); attributes kind (int64), alpha (f64).  Targets, registered by matfun/jax.py:
+//   SmfValue, SmfValueJac, SmfValueJacHess: Voigt layout as smf_eval, x (..., 6), F (..., 6), J (..., 6, 6),
+//   H (..., 6, 6, 6)
+//   GmfValue, GmfValueJac, GmfValueJacHess: general matrices as gmf_eval, x (..., 3, 3), F (..., 3, 3),
+//   J (..., 3, 3, 3, 3), H (..., 3, 3, 3, 3, 3, 3)
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -15,6 +16,7 @@
 #include "xla/ffi/api/ffi.h"
 
 namespace ffi = xla::ffi;
+using smf_dispatch::Family;
 
 // dynamic chunks; the caller works too and only waits for chunks already claimed by a running thread
 // (no deadlock if the pool has one thread or scheduled tasks start late)
@@ -35,128 +37,44 @@ static void parallel_chunks(ffi::ThreadPool &pool, int64_t n, int64_t chunk, Bod
   while (st->done.load(std::memory_order_acquire) < nchunks) std::this_thread::yield();
 }
 
-static ffi::Error Eval(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, double *F, double *J, int64_t kind, double alpha,
-                       double *H = nullptr) {
-  auto dims = x.dimensions();
-  if (dims.size() == 0 || dims[dims.size() - 1] != 6)
-    return ffi::Error::InvalidArgument("matfun: expected Voigt vectors of shape (..., 6)");
-  // same checks and normalisation as smf_eval (c/src/matfun.cc)
-  if (kind < SMF_EXP || kind > SMF_SQRT || (kind == SMF_POW && !(alpha > 0)))
-    return ffi::Error::InvalidArgument("matfun: invalid kind or alpha");
-  if (kind != SMF_POW) alpha = kind == SMF_SQRT ? 0.5 : 0.0;
-  const int64_t n = x.element_count() / 6;
-  const double *xp = x.typed_data();
-  const smf_dispatch::batch_fn batch = smf_dispatch::impl().fn;
-  parallel_chunks(pool, n, H ? 256 : 1024, [=](int64_t lo, int64_t hi) {
-    batch((int)kind, hi - lo, xp + 6 * lo, F + 6 * lo, J ? J + 36 * lo : nullptr, alpha, H ? H + 216 * lo : nullptr, 0);
-  });
+template <Family FAM>
+static ffi::Error Eval(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::RemainingRets out, int64_t kind,
+                       double alpha) {
+  const auto dims = x.dimensions();
+  const size_t r = dims.size();
+  if (FAM == smf_dispatch::VOIGT ? r < 1 || dims[r - 1] != 6 : r < 2 || dims[r - 1] != 3 || dims[r - 2] != 3)
+    return ffi::Error::InvalidArgument(FAM == smf_dispatch::VOIGT ? "matfun: expected Voigt vectors of shape (..., 6)"
+                                                                  : "matfun: expected matrices of shape (..., 3, 3)");
+  if (out.size() < 1 || out.size() > 3) return ffi::Error::InvalidArgument("matfun: expected F, (F, J) or (F, J, H)");
+  double *p[3] = {};
+  for (size_t i = 0; i < out.size(); i++) {
+    auto b = out.get<ffi::Buffer<ffi::F64>>(i);
+    if (b.has_error()) return b.error();
+    p[i] = b.value()->typed_data();
+  }
+  // (kind outside the int range: invalid, as an unknown kind)
+  smf_dispatch::Call c{FAM, (int)std::clamp<int64_t>(kind, -1, SMF_SQRT + 1), alpha,
+                       (int64_t)x.element_count() / (FAM == smf_dispatch::VOIGT ? 6 : 9), x.typed_data(), p[0],
+                       p[1], p[2]};
+  if (!smf_dispatch::prepare(c)) return ffi::Error::InvalidArgument("matfun: invalid kind or alpha");
+  parallel_chunks(pool, c.n, smf_dispatch::chunk(c), [c](int64_t lo, int64_t hi) { smf_dispatch::run(c, lo, hi); });
   return ffi::Error::Success();
 }
 
-// general matrices (gmf_eval): x (..., 3, 3) -> F (..., 3, 3), J (..., 3, 3, 3, 3), H (..., 3, 3, 3, 3, 3, 3)
-static ffi::Error GEval(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, double *F, double *J, int64_t kind, double alpha,
-                        double *H = nullptr) {
-  auto dims = x.dimensions();
-  if (dims.size() < 2 || dims[dims.size() - 1] != 3 || dims[dims.size() - 2] != 3)
-    return ffi::Error::InvalidArgument("matfun: expected matrices of shape (..., 3, 3)");
-  if (kind < SMF_EXP || kind > SMF_SQRT || (kind == SMF_POW && !(alpha > 0)))
-    return ffi::Error::InvalidArgument("matfun: invalid kind or alpha");
-  if (kind == SMF_SQRT) kind = SMF_POW, alpha = 0.5;
-  if (kind != SMF_POW) alpha = 0.0;
-  const int64_t n = x.element_count() / 9;
-  const double *xp = x.typed_data();
-  const smf_dispatch::gbatch_fn gbatch = smf_dispatch::impl().gfn;
-  parallel_chunks(pool, n, H ? 256 : 1024, [=](int64_t lo, int64_t hi) {
-    gbatch((int)kind, hi - lo, xp + 9 * lo, F + 9 * lo, J ? J + 81 * lo : nullptr, alpha, H ? H + 729 * lo : nullptr);
-  });
-  return ffi::Error::Success();
-}
+#define MATFUN_HANDLER(name, fam)                                              \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(name, Eval<smf_dispatch::fam>, ffi::Ffi::Bind() \
+                                                                   .Ctx<ffi::ThreadPool>()                     \
+                                                                   .Arg<ffi::Buffer<ffi::F64>>()               \
+                                                                   .RemainingRets()                            \
+                                                                   .Attr<int64_t>("kind")                      \
+                                                                   .Attr<double>("alpha"))
 
-static ffi::Error GValueImpl(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                             int64_t kind, double alpha) {
-  return GEval(pool, x, F->typed_data(), nullptr, kind, alpha);
-}
-
-static ffi::Error GValueJacImpl(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                                ffi::ResultBuffer<ffi::F64> J, int64_t kind, double alpha) {
-  return GEval(pool, x, F->typed_data(), J->typed_data(), kind, alpha);
-}
-
-static ffi::Error GValueJacHessImpl(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                                    ffi::ResultBuffer<ffi::F64> J, ffi::ResultBuffer<ffi::F64> H, int64_t kind,
-                                    double alpha) {
-  return GEval(pool, x, F->typed_data(), J->typed_data(), kind, alpha, H->typed_data());
-}
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GmfValue, GValueImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::ThreadPool>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GmfValueJac, GValueJacImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::ThreadPool>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GmfValueJacHess, GValueJacHessImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::ThreadPool>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-static ffi::Error ValueImpl(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                            int64_t kind, double alpha) {
-  return Eval(pool, x, F->typed_data(), nullptr, kind, alpha);
-}
-
-static ffi::Error ValueJacImpl(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                               ffi::ResultBuffer<ffi::F64> J, int64_t kind, double alpha) {
-  return Eval(pool, x, F->typed_data(), J->typed_data(), kind, alpha);
-}
-
-static ffi::Error ValueJacHessImpl(ffi::ThreadPool pool, ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> F,
-                                   ffi::ResultBuffer<ffi::F64> J, ffi::ResultBuffer<ffi::F64> H, int64_t kind,
-                                   double alpha) {
-  return Eval(pool, x, F->typed_data(), J->typed_data(), kind, alpha, H->typed_data());
-}
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(SmfValue, ValueImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::ThreadPool>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(SmfValueJac, ValueJacImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::ThreadPool>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(SmfValueJacHess, ValueJacHessImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::ThreadPool>()
-                                  .Arg<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Ret<ffi::Buffer<ffi::F64>>()
-                                  .Attr<int64_t>("kind")
-                                  .Attr<double>("alpha"));
+MATFUN_HANDLER(SmfValue, VOIGT);
+MATFUN_HANDLER(SmfValueJac, VOIGT);
+MATFUN_HANDLER(SmfValueJacHess, VOIGT);
+MATFUN_HANDLER(GmfValue, GENERAL);
+MATFUN_HANDLER(GmfValueJac, GENERAL);
+MATFUN_HANDLER(GmfValueJacHess, GENERAL);
 
 // XLA FFI API version the handlers were built against (major * 1000 + minor); matfun.jax only registers them with
 // a jaxlib of the same major and at least this minor version
