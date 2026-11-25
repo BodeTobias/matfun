@@ -21,8 +21,9 @@ bool prepare(Call &c) {
     return false;
   if (c.fam == GENERAL && c.kind == SMF_SQRT) c.kind = SMF_POW, c.alpha = 0.5;
   if (c.kind != SMF_POW) c.alpha = c.kind == SMF_SQRT ? 0.5 : 0.0;
-  c.fn = impl().fn;
-  c.gfn = impl().gfn;
+  const Impl &d = impl();
+  c.fn = c.n == 1 ? d.fn1 : d.fn;
+  c.gfn = c.n == 1 ? d.gfn1 : d.gfn;
   return true;
 }
 

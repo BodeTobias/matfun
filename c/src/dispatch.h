@@ -17,11 +17,13 @@ struct Impl {
   gbatch_fn gfn;      // smf::gbatch_any of the chosen variant
   int width;          // matrices per SIMD vector
   const char *name;   // "avx512", "avx2", "native" or "scalar"
+  batch_fn fn1 = nullptr;     // for a call with one matrix: the scalar variant (a SIMD vector would mostly compute
+  gbatch_fn gfn1 = nullptr;   // padding), or the variant forced by MATFUN_SIMD
 };
 
 // chosen on first use (thread-safe): the widest variant the CPU supports and for which libmvec provides all
 // vector functions; the environment variable MATFUN_SIMD=avx512|avx2|native|scalar restricts the choice to one
-// variant if that one is usable
+// variant if that one is usable (then also for one matrix)
 const Impl &impl();
 
 // ---- one call: n inputs x of a family -> F, J, H (J, H may be nullptr; H needs J), layouts as in matfun.h:

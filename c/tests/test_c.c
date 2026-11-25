@@ -83,7 +83,8 @@ int main(void) {
       check(buf, maxrel(H0, Hfd, 216), 1e-8);
     }
 
-  /* batch == single calls (SIMD tail handling), n = 37 */
+  /* batch == single calls (SIMD tail handling), n = 37; one matrix runs the scalar kernel unless MATFUN_SIMD forces
+     a variant: equal up to rounding */
   enum { N = 37 };
   double *xb = malloc(sizeof(double) * 6 * N), *Fb = malloc(sizeof(double) * 6 * N), *Jb = malloc(sizeof(double) * 36 * N);
   double *Hb = malloc(sizeof(double) * 216 * N);
@@ -99,7 +100,7 @@ int main(void) {
     smf_eval(SMF_LOG, 0, 1, xb + 6 * i, F1, J1, H1);
     err = fmax(err, fmax(maxrel(Fb + 6 * i, F1, 6), fmax(maxrel(Jb + 36 * i, J1, 36), maxrel(Hb + 216 * i, H1, 216))));
   }
-  check("batch of 37 == single calls (F, J, H)", err, 0);
+  check("batch of 37 == single calls (F, J, H)", err, 1e-14);
   free(xb); free(Fb); free(Jb); free(Hb);
 
   /* matrix layout: smf_eval_matrix == the Voigt results with the weights 1 (diagonal) and 1/2 (off-diagonal) of
@@ -249,7 +250,7 @@ int main(void) {
       }
       err = fmax(err, fmax(maxrel(Fg + 9 * i, F1, 9), fmax(maxrel(Jg + 81 * i, J1, 81), maxrel(Hg + 729 * i, H1, 729))));
     }
-    check("gmf: batch of 37 == single calls (F, J, H)", err, 0);
+    check("gmf: batch of 37 == single calls (F, J, H)", err, 1e-14);
     check("gmf: real eigenvalue < 0 -> NaN (log), only that matrix", nanok ? 0 : 1, 0);
     free(Ab); free(Fg); free(Jg); free(Hg);
     check("gmf: invalid kind / alpha / H without J -> -1",

@@ -114,7 +114,8 @@ def test_gmf_symmetric_input_matches_smf():
 
 def test_gmf_domain_and_batch():
     """NaN for a real eigenvalue <= 0 (log, sqrt, pow), only for that matrix of a batch; complex eigenvalues with
-    negative real part are in the domain (principal branch); results do not depend on the batch neighbours"""
+    negative real part are in the domain (principal branch); results do not depend on the batch neighbours (up to
+    rounding: one matrix runs the scalar kernel)"""
     rng = np.random.default_rng(3)
     A = 1.5 * np.eye(3) + 0.3 * rng.standard_normal((13, 3, 3))
     A[4] = np.diag([-1.0, 2.0, 3.0])
@@ -125,7 +126,7 @@ def test_gmf_domain_and_batch():
         assert bad.tolist() == [i == 4 for i in range(13)], kind
         for i in (0, 9, 12):
             Fi, Ji, Hi = matfun.gmf(kind, A[i], order=2)
-            assert np.array_equal(Fi, F[i]) and np.array_equal(Ji, J[i]) and np.array_equal(Hi, H[i])
+            assert relerr(Fi, F[i]) < 1e-14 and relerr(Ji, J[i]) < 1e-14 and relerr(Hi, H[i]) < 1e-13
     L = matfun.gmf("log", A[9])
     assert relerr(matfun.gmf("exp", L), A[9]) < 1e-14
     assert np.all(np.isfinite(matfun.gmf("exp", A, order=2)[2]))
