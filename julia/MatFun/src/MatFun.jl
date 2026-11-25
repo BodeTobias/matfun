@@ -456,7 +456,7 @@ end
     return nothing
 end
 
-@eval @inline function _second!(H, V, D2u)
+@eval @noinline function _second!(H, V, D2u)
     @inbounds $(_second_code())
     return nothing
 end
