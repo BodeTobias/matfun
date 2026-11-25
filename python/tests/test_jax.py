@@ -172,7 +172,7 @@ def test_jax_matrix_symmetries_and_check(dev):
 
 @pytest.mark.parametrize("dev", DEVICES, ids=lambda d: d.platform)
 def test_jax_float32_with_x64(dev):
-    """float32 input with jax_enable_x64 (CPU: the float64 kernel, GPU: pure JAX): results and derivatives stay
+    """float32 input with jax_enable_x64 (the float64 kernels, pure JAX without): results and derivatives stay
     float32. Precision "highest": on GPUs, float32 matrix products default to TF32 (errors ~1e-4)"""
     A = spd((), 3)
     with jax.default_device(dev), jax.default_matmul_precision("highest"):
@@ -296,7 +296,7 @@ def test_jax_gmf_vs_independent_references(dev):
 
 @pytest.mark.parametrize("dev", DEVICES, ids=lambda d: d.platform)
 def test_jax_gmf_float32_with_x64(dev):
-    """float32 input (CPU: the float64 kernel, GPU: pure JAX): results stay float32, close to float64"""
+    """float32 input (the float64 kernels, pure JAX without): results stay float32, close to float64"""
     A = gen_matrices(4, 5)
     with jax.default_device(dev), jax.default_matmul_precision("highest"):
         out = mf.gmf("log", jnp.asarray(A, jnp.float32), order=2)

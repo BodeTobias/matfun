@@ -15,9 +15,9 @@ of a matrix with |A_ij - A_ji| > 1e-8 max |A_kl| (float32: 1e-4) are NaN.  gmf: 
 matrix with a real eigenvalue <= 0.
 
 Which code runs is decided per backend when a function is lowered (a primitive with a lowering per platform): the C
-kernel of libmatfun on the CPU (float32 in float64, with jax_enable_x64), the CUDA kernel of the plugin
-matfun-cuda13 / matfun-cuda12 on NVIDIA GPUs (pip install "matfun[cuda13]"), pure JAX otherwise (other backends,
-float32 on GPUs).  The pure-JAX version is also the primitive's impl, for tools that inline primitives.
+kernel of libmatfun on the CPU, the CUDA kernel of the plugin matfun-cuda13 / matfun-cuda12 on NVIDIA GPUs
+(pip install "matfun[cuda13]"), float32 in float64 there (with jax_enable_x64); pure JAX otherwise (other backends).
+The pure-JAX version is also the primitive's impl, for tools that inline primitives.
 MATFUN_LIB / MATFUN_CUDA_LIB override the library paths.
 """
 import ctypes
@@ -193,12 +193,12 @@ def _abstract(x, *, fam, order, kind, alpha):
     return [jax.core.ShapedArray(x.shape[:-_NIN[fam]] + s, x.dtype) for s in _SHAPES[fam][:order + 1]]
 
 
-def _lowering(fams, upcast):
+def _lowering(fams):
     """lowering of a platform with the kernels of the families fams: matrices through the Voigt kernel where the
-    matrix one is missing; float32 in float64 if upcast (and x64 is enabled); pure JAX for other dtypes"""
+    matrix one is missing; float32 in float64 (if x64 is enabled); pure JAX for other dtypes"""
     def lower(x, *, fam, order, kind, alpha):
         p = dict(order=order, kind=kind, alpha=alpha)
-        if upcast and x.dtype == jnp.float32 and jax.dtypes.canonicalize_dtype(np.float64) == np.float64:
+        if x.dtype == jnp.float32 and jax.dtypes.canonicalize_dtype(np.float64) == np.float64:
             return tuple(y.astype(x.dtype) for y in lower(x.astype(jnp.float64), fam=fam, **p))
         if x.dtype != jnp.float64 or fam not in fams and (fam != "matrix" or "voigt" not in fams):
             return _pure(x, fam=fam, **p)
@@ -222,9 +222,9 @@ _p.def_abstract_eval(_abstract)
 batching.primitive_batchers[_p] = _batch
 mlir.register_lowering(_p, mlir.lower_fun(_pure, multiple_results=True))
 if _lib is not None:
-    mlir.register_lowering(_p, mlir.lower_fun(_lowering(_fams_cpu, True), multiple_results=True), platform="cpu")
+    mlir.register_lowering(_p, mlir.lower_fun(_lowering(_fams_cpu), multiple_results=True), platform="cpu")
 if _lib_cuda is not None:
-    mlir.register_lowering(_p, mlir.lower_fun(_lowering(_fams_cuda, False), multiple_results=True), platform="cuda")
+    mlir.register_lowering(_p, mlir.lower_fun(_lowering(_fams_cuda), multiple_results=True), platform="cuda")
 
 
 # --------------------------------------------------------------------------------------
