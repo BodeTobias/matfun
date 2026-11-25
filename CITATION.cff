@@ -6,8 +6,8 @@ authors:
   - family-names: Bode
     given-names: Tobias
 doi: 10.5281/zenodo.23981300
-version: 0.1.2
-date-released: 2026-11-18
+version: 0.1.3
+date-released: 2026-11-25
 license: MIT
 repository-code: "https://github.com/BodeTobias/matfun"
 keywords:
