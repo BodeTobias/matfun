@@ -1,3 +1,5 @@
+<img width="150" height="150" alt="matfun-logo" src="https://github.com/user-attachments/assets/b54a819e-d78d-432a-a758-41add035f060" /> 
+
 # matfun
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23981300.svg)](https://doi.org/10.5281/zenodo.23981300)
