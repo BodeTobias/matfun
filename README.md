@@ -1,4 +1,6 @@
+<div align="center">
 <img width="150" height="150" alt="matfun-logo" src="https://github.com/user-attachments/assets/b54a819e-d78d-432a-a758-41add035f060" /> 
+</div>
 
 # matfun
 
